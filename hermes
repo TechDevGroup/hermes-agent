@@ -4,8 +4,59 @@ Hermes Agent CLI launcher.
 
 This wrapper should behave like the installed `hermes` command, including
 subcommands such as `gateway`, `cron`, and `doctor`.
+
+If launched under a Python interpreter that lacks the project's installed
+dependencies (e.g. this file copied to /usr/local/bin/hermes while the
+venv that owns hermes-agent's deps lives elsewhere — see issue #1), the
+launcher delegates to a co-located venv's hermes entry point instead of
+crashing on the missing import.
 """
+import os
+import sys
+
+
+def _venv_hermes_bin() -> str | None:
+    import importlib.util
+    from pathlib import Path
+
+    candidates: list[Path] = []
+
+    # Venv co-located with the hermes_cli package we just tried to import
+    # (works even when this launcher has been copied out of the repo).
+    spec = importlib.util.find_spec("hermes_cli")
+    if spec is not None and spec.origin:
+        pkg_root = Path(spec.origin).resolve().parent.parent
+        candidates += [pkg_root / "venv", pkg_root / ".venv"]
+
+    # Venv co-located with this launcher (works when symlinked from a bin dir).
+    script_dir = Path(os.path.realpath(__file__)).parent
+    candidates += [script_dir / "venv", script_dir / ".venv"]
+
+    # Standard install layouts produced by scripts/install.sh.
+    candidates.append(Path("/usr/local/lib/hermes-agent/venv"))
+    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    candidates.append(hermes_home / "hermes-agent" / "venv")
+
+    self_real = Path(os.path.realpath(__file__))
+    for venv in candidates:
+        binary = venv / "bin" / "hermes"
+        if not (binary.is_file() and os.access(binary, os.X_OK)):
+            continue
+        # Avoid self-recursion if this launcher *is* the venv binary.
+        if Path(os.path.realpath(str(binary))) == self_real:
+            continue
+        return str(binary)
+    return None
+
 
 if __name__ == "__main__":
-    from hermes_cli.main import main
+    try:
+        from hermes_cli.main import main
+    except ImportError:
+        bin_path = _venv_hermes_bin()
+        if bin_path is None:
+            raise
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("PYTHONPATH", "PYTHONHOME")}
+        os.execve(bin_path, [bin_path, *sys.argv[1:]], env)
     main()
