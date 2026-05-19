@@ -1,0 +1,4 @@
+name: devagentic-local
+kind: model-provider
+description: Graph-mediated completions from a self-hosted devagentic instance
+version: 0.1.0
