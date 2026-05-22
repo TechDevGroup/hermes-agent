@@ -1,5 +1,7 @@
 name: devagentic-docs
-version: 0.1.0
-description: "Doc/finding authoring over devagentic's GraphQL surface. Provides /doc slash commands (search / write / show) backed by searchDocs + writeDoc. Sibling to devagentic-canvas — same env vars, same enable/disable contract. Disable with `hermes plugin disable devagentic-docs`; enabled state is fully inert otherwise."
+version: 0.2.0
+description: "Doc/finding authoring + context-fork injection over devagentic's GraphQL surface. Provides /doc (search / write / show) and /fork (open / close / show / pin / render) slash commands, plus a pre_llm_call hook that injects an active fork's renderContext output as ephemeral context. Sibling to devagentic-canvas — same env vars, same enable/disable contract. Disable with `hermes plugin disable devagentic-docs`; enabled state is fully inert otherwise."
 author: TechDevGroup
 kind: standalone
+hooks:
+  - pre_llm_call

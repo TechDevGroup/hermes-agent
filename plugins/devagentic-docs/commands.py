@@ -14,7 +14,9 @@ without trawling DEBUG logs (same pattern as canvas after #15).
 from __future__ import annotations
 
 import logging
+import os
 import shlex
+from pathlib import Path
 from typing import Optional
 
 from . import client as docs_client
@@ -23,9 +25,54 @@ from . import client as docs_client
 logger = logging.getLogger(__name__)
 
 
+_FORK_MARKER_NAME = "docs-fork-active"
+
+
 def _failure_detail() -> str:
     err = docs_client.last_error_text()
     return f" Reason: {err}." if err else ""
+
+
+# --- Active-fork marker file (analog of canvas-active) ----
+
+def _marker_path() -> Path:
+    home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    return Path(home) / _FORK_MARKER_NAME
+
+
+def _read_active_fork() -> Optional[str]:
+    p = _marker_path()
+    if not p.exists():
+        return None
+    try:
+        ctx_id = p.read_text(encoding="utf-8").strip()
+        return ctx_id or None
+    except OSError as exc:
+        logger.warning("devagentic-docs: failed to read %s: %s", p, exc)
+        return None
+
+
+def _write_active_fork(ctx_id: str) -> bool:
+    p = _marker_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(ctx_id, encoding="utf-8")
+        return True
+    except OSError as exc:
+        logger.warning("devagentic-docs: failed to write %s: %s", p, exc)
+        return False
+
+
+def _clear_active_fork() -> bool:
+    p = _marker_path()
+    if not p.exists():
+        return True
+    try:
+        p.unlink()
+        return True
+    except OSError as exc:
+        logger.warning("devagentic-docs: failed to unlink %s: %s", p, exc)
+        return False
 
 
 def _parse_search_args(args: str) -> tuple[str, int, Optional[str]]:
@@ -162,3 +209,146 @@ def doc_command(args: str) -> str:
     except Exception as exc:  # noqa: BLE001
         logger.exception("devagentic-docs: handler crashed")
         return f"`/doc {sub}` failed: {exc}"
+
+
+# --- /fork command surface --------------------------------
+
+def _parse_fork_open_args(args: str) -> tuple[str, Optional[str]]:
+    try:
+        tokens = shlex.split(args or "")
+    except ValueError:
+        tokens = (args or "").split()
+    goal: Optional[str] = None
+    rest: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--goal" and i + 1 < len(tokens):
+            goal = tokens[i + 1]
+            i += 2
+            continue
+        rest.append(t)
+        i += 1
+    return (rest[0] if rest else ""), goal
+
+
+def _handle_fork_open(args: str) -> str:
+    parent_id, goal = _parse_fork_open_args(args)
+    if not parent_id:
+        return ("Usage: `/fork open <parent_id> [--goal \"...\"]`. "
+                "The parent is the doc or context id to derive from; "
+                "`--goal` is a human description stored as the goal "
+                "annotation on the new fork.")
+    annotations = []
+    if goal:
+        annotations.append({"key": "goal", "value": goal,
+                            "weight": 1.0})
+    annotations.append({"key": "pinned-doc", "value": parent_id,
+                        "weight": 1.0})
+    ctx = docs_client.fork_context(
+        parent_id=parent_id,
+        tags=["source:hermes-cli"],
+        annotations=annotations)
+    if ctx is None:
+        return ("Couldn't fork the context." + _failure_detail())
+    ctx_id = ctx.get("id") or ""
+    if not ctx_id:
+        return "Fork succeeded but devagentic returned no id."
+    if not _write_active_fork(ctx_id):
+        return (f"Forked context `{ctx_id}` but couldn't persist the "
+                "active-fork marker. /fork close to clear.")
+    msg = (f"Opened fork **`{ctx_id}`** (parent: `{parent_id}`)")
+    if goal:
+        msg += f" — goal: _{goal}_"
+    msg += ". Pinned-doc annotations will be injected each turn."
+    return msg
+
+
+def _handle_fork_close(_args: str) -> str:
+    prior = _read_active_fork()
+    _clear_active_fork()
+    if prior:
+        return f"Closed fork `{prior}`. No fork active."
+    return "No fork was active."
+
+
+def _handle_fork_show(_args: str) -> str:
+    ctx_id = _read_active_fork()
+    if not ctx_id:
+        return "No fork is active. Open one with `/fork open <id>`."
+    ctx = docs_client.get_context(ctx_id)
+    if ctx is None:
+        return (f"Active fork marker is `{ctx_id}` but devagentic "
+                "is unreachable." + _failure_detail())
+    tags = ctx.get("tags") or []
+    annotations = ctx.get("annotations") or []
+    lines = [f"**Active fork:** `{ctx_id}`"]
+    goal = next((a.get("value") for a in annotations
+                 if a.get("key") == "goal"), None)
+    if goal:
+        lines.append(f"_Goal:_ {goal}")
+    pinned = [a.get("value") for a in annotations
+              if a.get("key") == "pinned-doc"]
+    if pinned:
+        lines.append("**Pinned docs:**")
+        for did in pinned:
+            lines.append(f"- `{did}`")
+    if tags:
+        lines.append("Tags: " + ", ".join(f"`{t}`" for t in tags))
+    return "\n".join(lines)
+
+
+def _handle_fork_pin(args: str) -> str:
+    did = (args or "").strip().split()[0] if args.strip() else ""
+    if not did:
+        return ("Usage: `/fork pin <doc_id>`. The doc will be added "
+                "as a pinned-doc annotation on the active fork; its "
+                "rendered content is injected every turn.")
+    ctx_id = _read_active_fork()
+    if not ctx_id:
+        return "No fork is active. Open one with `/fork open <id>`."
+    updated = docs_client.decorate_context(
+        ctx_id=ctx_id, key="pinned-doc", value=did, weight=1.0)
+    if updated is None:
+        return ("Couldn't pin the doc." + _failure_detail())
+    return f"Pinned doc `{did}` on fork `{ctx_id}`."
+
+
+def _handle_fork_render(_args: str) -> str:
+    ctx_id = _read_active_fork()
+    if not ctx_id:
+        return "No fork is active. Open one with `/fork open <id>`."
+    rendered = docs_client.render_context(ctx_id)
+    if rendered is None:
+        return ("Couldn't render the fork." + _failure_detail())
+    if not rendered.strip():
+        return f"Fork `{ctx_id}` rendered to an empty string."
+    return f"**Rendered fork `{ctx_id}`:**\n\n{rendered}"
+
+
+_FORK_SUBCOMMANDS = {
+    "open":   _handle_fork_open,
+    "close":  _handle_fork_close,
+    "show":   _handle_fork_show,
+    "pin":    _handle_fork_pin,
+    "render": _handle_fork_render,
+}
+
+
+def fork_command(args: str) -> str:
+    """Dispatcher for `/fork <sub> <args>`."""
+    raw = (args or "").strip()
+    if not raw:
+        return ("Usage: `/fork <subcommand>` — `open`, `close`, "
+                "`show`, `pin`, or `render`.")
+    head, _, tail = raw.partition(" ")
+    sub = head.strip().lower()
+    handler = _FORK_SUBCOMMANDS.get(sub)
+    if handler is None:
+        return (f"Unknown `/fork` subcommand: `{sub}`. "
+                f"Available: {', '.join(_FORK_SUBCOMMANDS)}.")
+    try:
+        return handler(tail)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("devagentic-docs: fork handler crashed")
+        return f"`/fork {sub}` failed: {exc}"

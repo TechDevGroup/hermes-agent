@@ -40,12 +40,21 @@ def plugin_pkg(tmp_path, monkeypatch):
 
     client = _load("client")
     commands = _load("commands")
+    preamble = _load("preamble")
+    # Pin the submodules as attributes on the package so the
+    # `from . import …` chain inside __init__.py picks up the
+    # SAME instances we just loaded (rather than re-importing
+    # them via fresh specs that would shadow our monkeypatches).
+    pkg.client = client
+    pkg.commands = commands
+    pkg.preamble = preamble
 
     assert spec.loader is not None
     spec.loader.exec_module(pkg)
 
     from types import SimpleNamespace
-    return SimpleNamespace(pkg=pkg, client=client, commands=commands)
+    return SimpleNamespace(
+        pkg=pkg, client=client, commands=commands, preamble=preamble)
 
 
 # ─── Manifest ───────────────────────────────────────────────
@@ -57,8 +66,8 @@ def test_manifest_parses_and_declares_expected_fields():
     assert "version" in manifest
     assert "description" in manifest
     assert manifest.get("kind") == "standalone"
-    # MVP doesn't register a pre_llm_call hook.
-    assert not manifest.get("hooks")
+    # v0.2 wires pre_llm_call for fork preamble injection.
+    assert "pre_llm_call" in (manifest.get("hooks") or [])
 
 
 # ─── Base URL normalization ─────────────────────────────────
@@ -137,15 +146,65 @@ def test_last_error_graphql_errors(plugin_pkg, monkeypatch):
 
 # ─── search_docs ────────────────────────────────────────────
 
-def test_search_docs_returns_parsed_hits(plugin_pkg, monkeypatch):
+def test_search_docs_freetext_uses_searchDocs(plugin_pkg, monkeypatch):
+    """No --tag set → schema-correct searchDocs(query, k) path."""
     monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    captured: dict = {}
     hits = [{"id": "doc-1", "content": "hello", "tags": ["a"],
-             "score": 0.9}]
+             "source": "s", "ts": "now"}]
+
+    def _stub(query, variables, **k):
+        captured["query"] = query
+        captured["variables"] = variables
+        return {"searchDocs": hits}
+
+    monkeypatch.setattr(plugin_pkg.client, "_post_graphql", _stub)
+    out = plugin_pkg.client.search_docs("hi", limit=5)
+    assert out == hits
+    assert "$k:Int" in captured["query"]
+    assert captured["variables"] == {"q": "hi", "k": 5}
+    assert "limit" not in captured["query"]
+    assert "score" not in captured["query"]
+
+
+def test_search_docs_tag_uses_docs_query(plugin_pkg, monkeypatch):
+    """--tag set → schema-correct docs(tags:[t]) path; sliced
+    client-side."""
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    captured: dict = {}
+    raw_hits = [
+        {"id": f"doc-{i}", "content": f"line {i}", "tags": ["k"],
+         "source": "s", "ts": "t"}
+        for i in range(5)
+    ]
+
+    def _stub(query, variables, **k):
+        captured["query"] = query
+        captured["variables"] = variables
+        return {"docs": raw_hits}
+
+    monkeypatch.setattr(plugin_pkg.client, "_post_graphql", _stub)
+    out = plugin_pkg.client.search_docs("line", limit=3, tag="k")
+    assert len(out) == 3
+    assert captured["variables"] == {"t": ["k"]}
+    assert "docs(tags:$t)" in captured["query"]
+
+
+def test_search_docs_tag_filters_by_query_substring(
+        plugin_pkg, monkeypatch):
+    """With --tag, the query string is a substring filter applied
+    client-side over the tag-scoped result set."""
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    raw_hits = [
+        {"id": "doc-a", "content": "apple", "tags": ["k"]},
+        {"id": "doc-b", "content": "banana", "tags": ["k"]},
+        {"id": "doc-c", "content": "apricot", "tags": ["k"]},
+    ]
     monkeypatch.setattr(
         plugin_pkg.client, "_post_graphql",
-        lambda q, v, **k: {"searchDocs": hits})
-    out = plugin_pkg.client.search_docs("hi", limit=5, tag="a")
-    assert out == hits
+        lambda q, v, **k: {"docs": raw_hits})
+    out = plugin_pkg.client.search_docs("ap", limit=10, tag="k")
+    assert [h["id"] for h in out] == ["doc-a", "doc-c"]
 
 
 def test_search_docs_empty_query_short_circuits(plugin_pkg):
@@ -177,9 +236,8 @@ def test_handle_search_usage_when_empty(plugin_pkg):
 def test_handle_search_renders_hits(plugin_pkg, monkeypatch):
     monkeypatch.setattr(
         plugin_pkg.client, "search_docs",
-        lambda **k: [{"id": "doc-1", "content": "line 1\nline 2",
-                      "score": 0.8},
-                     {"id": "doc-2", "content": "another", "score": 0.5}])
+        lambda **k: [{"id": "doc-1", "content": "line 1\nline 2"},
+                     {"id": "doc-2", "content": "another"}])
     out = plugin_pkg.commands._handle_search("hello")
     assert "doc-1" in out and "doc-2" in out
     assert "Top 2" in out
@@ -293,3 +351,210 @@ def test_doc_command_dispatcher_routes_search(plugin_pkg, monkeypatch):
                         lambda **k: [])
     out = plugin_pkg.commands.doc_command("search anything")
     assert "No docs matched" in out
+
+
+# ─── /fork command surface ──────────────────────────────────
+
+@pytest.fixture
+def fork_marker(plugin_pkg, tmp_path, monkeypatch):
+    """Re-point HERMES_HOME at tmp_path so the marker file goes
+    somewhere isolated, regardless of the plugin_pkg fixture's
+    earlier setenv (fixture order is pytest-dependent)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    return tmp_path / "docs-fork-active"
+
+
+def test_fork_open_writes_marker_and_calls_forkContext(
+        plugin_pkg, fork_marker, monkeypatch):
+    captured: dict = {}
+
+    def _stub(parent_id, tags, annotations, **k):
+        captured["parent_id"] = parent_id
+        captured["tags"] = list(tags or [])
+        captured["annotations"] = list(annotations or [])
+        return {"id": "ctx-7"}
+
+    monkeypatch.setattr(plugin_pkg.client, "fork_context", _stub)
+    out = plugin_pkg.commands._handle_fork_open(
+        'doc-parent --goal "trace the bug"')
+    assert "ctx-7" in out
+    assert "doc-parent" in out
+    assert "trace the bug" in out
+    assert captured["parent_id"] == "doc-parent"
+    assert "source:hermes-cli" in captured["tags"]
+    keys = [a["key"] for a in captured["annotations"]]
+    assert "goal" in keys
+    assert "pinned-doc" in keys
+    assert fork_marker.read_text(encoding="utf-8") == "ctx-7"
+
+
+def test_fork_open_without_parent_returns_usage(plugin_pkg):
+    out = plugin_pkg.commands._handle_fork_open("")
+    assert "Usage:" in out
+
+
+def test_fork_open_failure_surfaces_reason(plugin_pkg, monkeypatch):
+    monkeypatch.setattr(plugin_pkg.client, "fork_context",
+                        lambda **k: None)
+    monkeypatch.setattr(plugin_pkg.client, "last_error_text",
+                        lambda: "auth failed — set DEVAGENTIC_API_KEY")
+    out = plugin_pkg.commands._handle_fork_open("doc-x")
+    assert "Reason:" in out
+    assert "auth failed" in out
+
+
+def test_fork_close_clears_marker(plugin_pkg, fork_marker):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-9", encoding="utf-8")
+    out = plugin_pkg.commands._handle_fork_close("")
+    assert "ctx-9" in out
+    assert not fork_marker.exists()
+
+
+def test_fork_close_when_none_active(plugin_pkg, fork_marker):
+    out = plugin_pkg.commands._handle_fork_close("")
+    assert "No fork was active" in out
+
+
+def test_fork_show_renders_active(plugin_pkg, fork_marker, monkeypatch):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-5", encoding="utf-8")
+    monkeypatch.setattr(
+        plugin_pkg.client, "get_context",
+        lambda ctx_id, **k: {
+            "id": ctx_id,
+            "ts": "now",
+            "tags": ["source:hermes-cli", "k:foo"],
+            "annotations": [
+                {"key": "goal", "value": "investigate", "weight": 1.0},
+                {"key": "pinned-doc", "value": "doc-1", "weight": 1.0},
+                {"key": "pinned-doc", "value": "doc-2", "weight": 0.5},
+            ],
+        })
+    out = plugin_pkg.commands._handle_fork_show("")
+    assert "ctx-5" in out
+    assert "investigate" in out
+    assert "doc-1" in out and "doc-2" in out
+    assert "k:foo" in out
+
+
+def test_fork_show_when_none_active(plugin_pkg, fork_marker):
+    out = plugin_pkg.commands._handle_fork_show("")
+    assert "No fork is active" in out
+
+
+def test_fork_pin_calls_decorateContext(
+        plugin_pkg, fork_marker, monkeypatch):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-1", encoding="utf-8")
+    captured: dict = {}
+
+    def _stub(ctx_id, key, value, weight=1.0, **k):
+        captured["ctx_id"] = ctx_id
+        captured["key"] = key
+        captured["value"] = value
+        return {"id": ctx_id, "annotations": []}
+
+    monkeypatch.setattr(plugin_pkg.client, "decorate_context", _stub)
+    out = plugin_pkg.commands._handle_fork_pin("doc-42")
+    assert "doc-42" in out
+    assert captured == {"ctx_id": "ctx-1", "key": "pinned-doc",
+                        "value": "doc-42"}
+
+
+def test_fork_pin_requires_active_fork(plugin_pkg, fork_marker):
+    out = plugin_pkg.commands._handle_fork_pin("doc-42")
+    assert "No fork is active" in out
+
+
+def test_fork_render_returns_rendered_text(
+        plugin_pkg, fork_marker, monkeypatch):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-1", encoding="utf-8")
+    monkeypatch.setattr(plugin_pkg.client, "render_context",
+                        lambda ctx_id, **k: "rendered body here")
+    out = plugin_pkg.commands._handle_fork_render("")
+    assert "ctx-1" in out
+    assert "rendered body here" in out
+
+
+def test_fork_render_empty_string(plugin_pkg, fork_marker, monkeypatch):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-1", encoding="utf-8")
+    monkeypatch.setattr(plugin_pkg.client, "render_context",
+                        lambda ctx_id, **k: "")
+    out = plugin_pkg.commands._handle_fork_render("")
+    assert "empty string" in out
+
+
+def test_fork_dispatcher_usage(plugin_pkg):
+    out = plugin_pkg.commands.fork_command("")
+    assert "Usage:" in out
+
+
+def test_fork_dispatcher_unknown_sub(plugin_pkg):
+    out = plugin_pkg.commands.fork_command("nope")
+    assert "Unknown" in out
+
+
+# ─── pre_llm_call preamble ──────────────────────────────────
+
+
+def _load_preamble(plugin_pkg):
+    """The plugin_pkg fixture now eagerly pre-loads preamble.py so
+    monkeypatches on plugin_pkg.client reach the preamble's
+    `docs_client` reference (same module instance)."""
+    return plugin_pkg.preamble
+
+
+def test_preamble_returns_none_when_no_active_fork(
+        plugin_pkg, fork_marker):
+    preamble = _load_preamble(plugin_pkg)
+    assert preamble.on_pre_llm_call() is None
+
+
+def test_preamble_returns_context_when_fork_active(
+        plugin_pkg, fork_marker, monkeypatch):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-42", encoding="utf-8")
+    preamble = _load_preamble(plugin_pkg)
+    monkeypatch.setattr(plugin_pkg.client, "render_context",
+                        lambda ctx_id, **k: "rendered fork state")
+    out = preamble.on_pre_llm_call()
+    assert isinstance(out, dict)
+    assert "context" in out
+    assert "ctx-42" in out["context"]
+    assert "rendered fork state" in out["context"]
+
+
+def test_preamble_returns_none_on_empty_render(
+        plugin_pkg, fork_marker, monkeypatch):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-42", encoding="utf-8")
+    preamble = _load_preamble(plugin_pkg)
+    monkeypatch.setattr(plugin_pkg.client, "render_context",
+                        lambda ctx_id, **k: "   ")
+    assert preamble.on_pre_llm_call() is None
+
+
+def test_preamble_caps_long_renders(
+        plugin_pkg, fork_marker, monkeypatch):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-42", encoding="utf-8")
+    preamble = _load_preamble(plugin_pkg)
+    monkeypatch.setattr(plugin_pkg.client, "render_context",
+                        lambda ctx_id, **k: "X" * 20000)
+    out = preamble.on_pre_llm_call()
+    assert out is not None
+    assert "truncated" in out["context"]
+    assert len(out["context"]) < 9000
+
+
+def test_preamble_returns_none_on_render_failure(
+        plugin_pkg, fork_marker, monkeypatch):
+    fork_marker.parent.mkdir(parents=True, exist_ok=True)
+    fork_marker.write_text("ctx-42", encoding="utf-8")
+    preamble = _load_preamble(plugin_pkg)
+    monkeypatch.setattr(plugin_pkg.client, "render_context",
+                        lambda ctx_id, **k: None)
+    assert preamble.on_pre_llm_call() is None

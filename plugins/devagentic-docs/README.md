@@ -21,14 +21,38 @@ registered.
 
 ## Surface
 
-* `/doc search <query> [--tag <tag>] [--limit N]` — top hits from
-  `searchDocs`. Lexical + embedding ranking; tag scopes to docs
-  with that exact tag.
+* `/doc search <query> [--tag <tag>] [--limit N]` — top hits. When
+  `--tag` is set, routes to `Query.docs(tags:[t])` (the tag-scoped
+  browser) and filters by query client-side. Otherwise routes to
+  `Query.searchDocs(query, k=limit)` (lexical + embedding ranking).
 * `/doc write <body> [--tags t1,t2,...]` — persist a doc via
-  `writeDoc`. Auto-tags with `source:hermes-cli` for downstream
-  filtering.
-* `/doc show <id>` — fetch a doc by id (top-1 search match,
-  identity-verified).
+  `writeDoc`. Auto-tags with `source:hermes-cli`.
+* `/doc show <id>` — fetch by id (top-1 search match, identity-
+  verified).
+
+### Fork surface (v0.2)
+
+* `/fork open <parent_id> [--goal "..."]` — wrap `forkContext` to
+  derive a context from a doc/context id. Sets a session-local
+  active-fork marker at `$HERMES_HOME/docs-fork-active`. The
+  parent is auto-pinned and the goal (if set) is stored as a
+  `goal` annotation.
+* `/fork close` — clear the active-fork marker.
+* `/fork show` — print the active fork's tags + annotations.
+* `/fork pin <doc_id>` — append a `pinned-doc` annotation to the
+  active fork via `decorateContext`.
+* `/fork render` — call `renderContext(ctxId)` and print the
+  result inline. Useful for debugging the preamble injection.
+
+### Preamble injection
+
+When a fork is active, the plugin's `pre_llm_call` hook calls
+`renderContext(ctxId)` and appends the result to the user message
+as ephemeral context. Cached prompt prefixes stay valid (the
+context goes on the user side, not the system prompt).
+
+Capped at 8000 chars by the hermes-side ceiling; devagentic's
+`renderContext` does its own bounding upstream.
 
 ## Configuration
 
@@ -57,17 +81,18 @@ Every code path is loss-tolerant:
 
 ```
 plugins/devagentic-docs/
-├── plugin.yaml          # manifest (no hooks in MVP)
+├── plugin.yaml          # manifest (declares pre_llm_call hook)
 ├── __init__.py          # register() entrypoint
 ├── client.py            # GraphQL client + last_error_text()
-└── commands.py          # /doc slash command handlers
+├── commands.py          # /doc + /fork handlers
+└── preamble.py          # pre_llm_call hook
 ```
 
-## Out of scope for MVP
+## Out of scope (still)
 
-* `/fork open <doc_id>` + `/fork close` (planned per #12; deferred
-  to keep MVP small).
-* `pre_llm_call` hook for pinned-doc context injection (planned
-  per #12; deferred — needs the `/fork` marker file first).
 * `/doc delete` — devagentic's doc graph is append-only by design;
-  if a delete primitive lands, surface it then.
+  if a delete primitive lands upstream, surface it then.
+* Fork branching from a *context* id rather than a doc id —
+  `forkContext` accepts any parent id; the slash command surface
+  treats them uniformly, but no helper exists for "fork the last
+  conversation" yet.
