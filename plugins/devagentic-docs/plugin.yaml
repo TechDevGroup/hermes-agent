@@ -1,0 +1,5 @@
+name: devagentic-docs
+version: 0.1.0
+description: "Doc/finding authoring over devagentic's GraphQL surface. Provides /doc slash commands (search / write / show) backed by searchDocs + writeDoc. Sibling to devagentic-canvas — same env vars, same enable/disable contract. Disable with `hermes plugin disable devagentic-docs`; enabled state is fully inert otherwise."
+author: TechDevGroup
+kind: standalone
