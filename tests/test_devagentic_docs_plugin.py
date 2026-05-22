@@ -70,6 +70,49 @@ def test_manifest_parses_and_declares_expected_fields():
     assert "pre_llm_call" in (manifest.get("hooks") or [])
 
 
+def test_skill_md_parses_and_has_expected_name():
+    """`devagentic-docs:docs` reference skill must be parseable
+    by hermes' skill loader (same frontmatter shape canvas uses)."""
+    skill_path = PLUGIN_DIR / "skills" / "docs" / "SKILL.md"
+    assert skill_path.is_file(), skill_path
+    text = skill_path.read_text(encoding="utf-8")
+    # frontmatter block parses
+    assert text.startswith("---\n")
+    _, frontmatter, body = text.split("---", 2)
+    fm = yaml.safe_load(frontmatter)
+    assert fm["name"] == "docs"
+    assert "version" in fm
+    assert "description" in fm
+    # body has the surface tables
+    assert "/doc search" in body
+    assert "/fork open" in body
+    # Transport caveat is documented (links #21).
+    assert "#21" in body
+
+
+def test_register_skill_invoked_with_docs(plugin_pkg, tmp_path):
+    """Plugin's register() should call ctx.register_skill(name="docs")
+    when SKILL.md is on disk."""
+    calls: list[dict] = []
+
+    class _Ctx:
+        def register_command(self, **kw):
+            calls.append({"kind": "command", **kw})
+
+        def register_hook(self, name, handler):
+            calls.append({"kind": "hook", "name": name})
+
+        def register_skill(self, **kw):
+            calls.append({"kind": "skill", **kw})
+
+    ctx = _Ctx()
+    plugin_pkg.pkg.register(ctx)
+    skills = [c for c in calls if c["kind"] == "skill"]
+    assert len(skills) == 1, calls
+    assert skills[0]["name"] == "docs"
+    assert skills[0]["path"].name == "SKILL.md"
+
+
 # ─── Base URL normalization ─────────────────────────────────
 
 def test_base_url_strips_v1_for_graphql(plugin_pkg, monkeypatch):
