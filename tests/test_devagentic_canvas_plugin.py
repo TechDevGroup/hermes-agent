@@ -129,6 +129,111 @@ def test_base_url_strips_trailing_slash_before_append(
     assert plugin_pkg.client._base_url() == "http://devbox:6070/v1"
 
 
+# ─── last_error_text() (#15) ────────────────────────────────
+
+def test_last_error_unresolved_user_id(plugin_pkg, monkeypatch):
+    monkeypatch.delenv("DEVAGENTIC_USER_ID", raising=False)
+    import sys as _sys
+    fake = type("F", (), {"get_active_profile_name": staticmethod(
+        lambda: None)})()
+    monkeypatch.setitem(_sys.modules, "hermes_cli.profiles", fake)
+    assert plugin_pkg.client._request("GET", "es") is None
+    err = plugin_pkg.client.last_error_text() or ""
+    assert "DEVAGENTIC_USER_ID" in err
+
+
+def test_last_error_auth_failed(plugin_pkg, monkeypatch):
+    import urllib.error
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+
+    def _raise(*a, **k):
+        raise urllib.error.HTTPError(
+            "http://x/", 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(plugin_pkg.client.urllib.request,
+                        "urlopen", _raise)
+    assert plugin_pkg.client._request("GET", "es") is None
+    err = plugin_pkg.client.last_error_text() or ""
+    assert "authentication failed" in err
+    assert "DEVAGENTIC_API_KEY" in err
+
+
+def test_last_error_not_found(plugin_pkg, monkeypatch):
+    import urllib.error
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+
+    def _raise(*a, **k):
+        raise urllib.error.HTTPError(
+            "http://x/", 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(plugin_pkg.client.urllib.request,
+                        "urlopen", _raise)
+    assert plugin_pkg.client._request("GET", "es") is None
+    err = plugin_pkg.client.last_error_text() or ""
+    assert "not found at" in err
+
+
+def test_last_error_unreachable(plugin_pkg, monkeypatch):
+    import urllib.error
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+
+    def _raise(*a, **k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(plugin_pkg.client.urllib.request,
+                        "urlopen", _raise)
+    assert plugin_pkg.client._request("GET", "es") is None
+    err = plugin_pkg.client.last_error_text() or ""
+    assert "unreachable at" in err
+
+
+def test_last_error_cleared_on_success(plugin_pkg, monkeypatch):
+    """A successful call must clear any prior failure so slash
+    commands don't append stale Reason: text."""
+    import urllib.error
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+
+    def _raise_then_succeed(state=[0]):
+        def _impl(*a, **k):
+            state[0] += 1
+            if state[0] == 1:
+                raise urllib.error.URLError("first call fails")
+            from io import BytesIO
+
+            class _Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self):
+                    return b'{"ok": true}'
+
+            return _Resp()
+        return _impl
+
+    monkeypatch.setattr(plugin_pkg.client.urllib.request,
+                        "urlopen", _raise_then_succeed())
+    assert plugin_pkg.client._request("GET", "es") is None
+    assert plugin_pkg.client.last_error_text() is not None
+    assert plugin_pkg.client._request("GET", "es") == {"ok": True}
+    assert plugin_pkg.client.last_error_text() is None
+
+
+def test_handle_list_appends_failure_detail(plugin_pkg, monkeypatch):
+    """When the client surfaces a Reason via last_error_text, the
+    slash command should append it to its user-facing string."""
+    monkeypatch.setattr(
+        plugin_pkg.client, "list_canvases", lambda **k: None)
+    monkeypatch.setattr(
+        plugin_pkg.client, "last_error_text",
+        lambda: "authentication failed — set DEVAGENTIC_API_KEY")
+    out = plugin_pkg.commands._handle_list("")
+    assert "Reason:" in out
+    assert "DEVAGENTIC_API_KEY" in out
+
+
 def test_client_list_canvases_returns_parsed_list(
         plugin_pkg, monkeypatch):
     monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")

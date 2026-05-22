@@ -62,15 +62,44 @@ def _user_id() -> Optional[str]:
         return None
 
 
+_last_error: Optional[str] = None
+
+
+def last_error_text() -> Optional[str]:
+    """Return a short, human-readable description of the most recent
+    `_request` failure on this process, or None if the last call
+    succeeded. Used by `/canvas` slash commands to enrich the
+    user-facing error string when a call returns None — the
+    `pre_llm_call` hook ignores this and stays silent (see #15).
+    """
+    return _last_error
+
+
+def _record_error(text: Optional[str]) -> None:
+    global _last_error
+    _last_error = text
+
+
 def _request(method: str, path: str,
              body: Optional[dict] = None,
              *, timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
     """Run one HTTP request against devagentic's REST surface.
-    Returns parsed JSON on 2xx, None on any failure. Never raises."""
+    Returns parsed JSON on 2xx, None on any failure. Never raises.
+
+    On failure, populates the module-level `last_error_text()` slot
+    with a short human-readable kind ("auth failed", "unreachable",
+    "not found at <url>", etc.). Callers that want loud failures
+    (slash commands) read it; callers that want silent loss-tolerant
+    behavior (pre_llm_call hook) ignore it.
+    """
+    _record_error(None)
     base = _base_url()
     user = _user_id()
     if not user:
-        logger.debug("canvas client: no user_id resolved")
+        msg = ("could not resolve user_id — set DEVAGENTIC_USER_ID or "
+               "run inside a hermes profile")
+        logger.debug("canvas client: %s", msg)
+        _record_error(msg)
         return None
     url = f"{base}/canvas{path}" if path else f"{base}/canvas"
     if not path.startswith("/") and path:
@@ -91,15 +120,32 @@ def _request(method: str, path: str,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            msg = ("authentication failed — set DEVAGENTIC_API_KEY "
+                   "(any non-empty value works when devagentic runs "
+                   "in trust-header mode)")
+        elif exc.code == 404:
+            msg = f"not found at {url}"
+        else:
+            msg = f"HTTP {exc.code} from {url}"
+        logger.debug("canvas client: %s %s → %s", method, url, msg)
+        _record_error(msg)
+        return None
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        msg = f"unreachable at {url} ({exc})"
         logger.debug("canvas client: %s %s failed: %s", method, url, exc)
+        _record_error(msg)
         return None
     try:
         payload = json.loads(raw or "null")
     except json.JSONDecodeError as exc:
+        msg = "invalid response body (not JSON)"
         logger.debug("canvas client: parse failed: %s", exc)
+        _record_error(msg)
         return None
     if not isinstance(payload, dict):
+        _record_error("response was not a JSON object")
         return None
     return payload
 
