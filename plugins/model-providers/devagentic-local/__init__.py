@@ -4,16 +4,26 @@ Registers a `devagentic-local` provider in hermes' provider registry. The
 profile points at a devagentic instance's OpenAI-compatible `/v1` endpoint
 running on the same machine (default: http://127.0.0.1:6071/v1).
 
-At v0 the devagentic-side `/v1/chat/completions` endpoint is a stub — the
-provider plugin exists so the hermes-side wiring is ready when devagentic
-finishes shipping its OpenAI-compat shim (tracked as Phase A in the
-hermes↔devagentic integration plan).
+Phase G (devagentic issue #50): the active hermes profile name is bound
+to devagentic's per-user vertical via the `X-User-Id` request header.
+`get_active_profile_name()` from `hermes_cli.profiles` resolves
+HERMES_HOME to the matching profile (e.g. `~/.hermes/profiles/alice` →
+`"alice"`; `~/.hermes` → `"default"`). The result is sent as
+`X-User-Id` on every devagentic request so alice's hermes session lands
+in alice's devagentic vertical and bob's lands in bob's. Manual
+`DEVAGENTIC_USER_ID` env beats the auto-binding for ops cases that need
+to pin a specific user_id.
 
 Env vars:
-  DEVAGENTIC_API_KEY   bearer token; can be any value while the v0 shim
-                        accepts all tokens. Required by hermes' auth probe
-                        even if devagentic doesn't enforce it yet.
+  DEVAGENTIC_API_KEY   bearer token; can be any value when devagentic
+                        runs in trust-header mode (DEVAGENTIC_TRUST_HEADER=1)
+                        — hermes doesn't need the per-user salt. Required
+                        by hermes' auth probe even when devagentic doesn't
+                        enforce it.
   DEVAGENTIC_BASE_URL  override the default base URL.
+  DEVAGENTIC_USER_ID   override the auto-bound X-User-Id with a fixed
+                        value. Use when the active hermes profile name
+                        and the desired devagentic vertical diverge.
 """
 
 import logging
@@ -24,6 +34,34 @@ from providers import register_provider
 from providers.base import ProviderProfile
 
 logger = logging.getLogger(__name__)
+
+
+# Phase G binding — resolve via lazy import so the plugin still imports
+# in contexts where hermes_cli isn't on the path (the standalone
+# devagentic-local probe in CI imports this module directly).
+def _resolve_user_id() -> str | None:
+    """Pick the X-User-Id to send to devagentic.
+
+    Resolution order:
+      1. `DEVAGENTIC_USER_ID` env var — manual override.
+      2. `hermes_cli.profiles.get_active_profile_name()` — derived
+         from HERMES_HOME path; returns `"default"` for the
+         ~/.hermes root, or the profile name for
+         `~/.hermes/profiles/<name>`.
+      3. `None` — caller doesn't inject the header, and devagentic
+         either falls back to its trust-header default or rejects
+         the request.
+    """
+    override = (os.environ.get("DEVAGENTIC_USER_ID") or "").strip()
+    if override:
+        return override
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        name = (get_active_profile_name() or "").strip()
+        return name or None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("devagentic-local: profile resolution failed: %s", exc)
+        return None
 
 
 class DevagenticLocalProfile(ProviderProfile):
@@ -48,6 +86,28 @@ class DevagenticLocalProfile(ProviderProfile):
         except Exception as exc:
             logger.debug("fetch_models(devagentic-local): %s", exc)
             return None
+
+    def build_api_kwargs_extras(
+        self,
+        *,
+        reasoning_config: dict | None = None,
+        **context: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Inject `X-User-Id` from the active hermes profile name.
+
+        The OpenAI SDK accepts `extra_headers` as a per-request kwarg;
+        we add it to the `top_level_kwargs` half of the tuple so the
+        transport layer threads it onto each `chat.completions.create`
+        call. Per-request (not client-construction) so a process that
+        switches profiles mid-session picks up the change on the next
+        completion.
+        """
+        extra_body_additions: dict[str, Any] = {}
+        top_level_kwargs: dict[str, Any] = {}
+        user_id = _resolve_user_id()
+        if user_id:
+            top_level_kwargs["extra_headers"] = {"X-User-Id": user_id}
+        return extra_body_additions, top_level_kwargs
 
 
 _base_url = os.environ.get("DEVAGENTIC_BASE_URL", "http://127.0.0.1:6071/v1").rstrip("/")
