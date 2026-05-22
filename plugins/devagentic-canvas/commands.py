@@ -95,12 +95,21 @@ def clear_active_canvas() -> bool:
 
 # --- handlers ------------------------------------------------
 
+def _failure_detail() -> str:
+    """Append the canvas client's last_error_text() to a user-facing
+    failure message so operators can distinguish auth / network /
+    not-found cases without digging into hermes logs (see #15)."""
+    err = canvas_client.last_error_text()
+    return f" Reason: {err}." if err else ""
+
+
 def _handle_list(_args: str) -> str:
     canvases = canvas_client.list_canvases()
     if canvases is None:
         return ("Couldn't reach devagentic. Check that it's running "
                 "at $DEVAGENTIC_BASE_URL and that your X-User-Id is "
-                "resolvable (see the canvas-plugin README).")
+                "resolvable (see the canvas-plugin README)."
+                + _failure_detail())
     if not canvases:
         return "No canvases yet. Create one with `/canvas new <name>`."
     lines = ["**Your canvases:**"]
@@ -125,7 +134,7 @@ def _handle_open(args: str) -> str:
     canvas = canvas_client.get_canvas(cid)
     if canvas is None:
         return (f"Canvas `{cid}` not found, or devagentic is unreachable. "
-                "Check `/canvas list`.")
+                "Check `/canvas list`." + _failure_detail())
     if not set_active_canvas_id(cid):
         return f"Couldn't persist the active-canvas marker. Canvas not opened."
     name = (canvas.get("canvas") or {}).get("name") or "(untitled)"
@@ -152,7 +161,7 @@ def _handle_show(_args: str) -> str:
     if canvas is None:
         return (f"Active canvas marker is `{cid}` but devagentic is "
                 "unreachable. The state-injection preamble will be empty "
-                "until devagentic comes back.")
+                "until devagentic comes back." + _failure_detail())
     meta = canvas.get("canvas") or {}
     name = meta.get("name") or "(untitled)"
     desc = (meta.get("description") or "").strip()
@@ -175,7 +184,8 @@ def _handle_new(args: str) -> str:
     canvas = canvas_client.create_canvas(name=name)
     if canvas is None:
         return ("Couldn't create canvas — devagentic unreachable or "
-                "auth failed. Check the canvas-plugin README.")
+                "auth failed. Check the canvas-plugin README."
+                + _failure_detail())
     cid = canvas.get("id") or "(no id)"
     return (f"Created canvas **{name}** (`{cid}`). "
             f"Open with `/canvas open {cid}`.")
