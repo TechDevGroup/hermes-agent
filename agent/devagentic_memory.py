@@ -30,6 +30,12 @@ wrapped in try/except. Resolver returns an empty list on any
 failure (network, parse, no facts, etc.); callers MUST keep their
 existing file fallback so a transient devagentic outage doesn't
 brick memory retrieval.
+
+Transport caveat: this adapter assumes devagentic exposes
+`/graphql` over HTTP. Some canonical deployments don't (see
+TechDevGroup/hermes-agent#21); query_user_facts returns []
+silently on every call there. Run `hermes doctor` for a probe
++ actionable hint when graph mode is enabled.
 """
 from __future__ import annotations
 

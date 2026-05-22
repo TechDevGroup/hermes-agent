@@ -29,6 +29,13 @@ wrapped in try/except. Resolver returns None on any failure
 (network, parse, missing-skill, etc.); callers MUST keep their
 existing file fallback so a transient devagentic outage doesn't
 brick `/skill-name`.
+
+Transport caveat: this adapter assumes devagentic exposes
+`/graphql` over HTTP. Some canonical deployments don't (see
+TechDevGroup/hermes-agent#21); the resolver silently falls back
+to None on every call there, and the file fallback kicks in.
+Run `hermes doctor` for a probe + actionable hint when graph
+mode is enabled.
 """
 from __future__ import annotations
 

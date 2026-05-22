@@ -111,6 +111,11 @@ def test_reports_not_found_on_404(monkeypatch):
 
     fail = [c for c in calls if c[0] == "fail"]
     assert any("not found" in c[1].lower() for c in fail), calls
+    # #21: 404 detail should point at the known transport gap so
+    # operators don't chase env-var mismatches before checking
+    # whether /graphql is exposed at all.
+    assert any("#21" in c[2] for c in fail), \
+        f"expected #21 reference in detail; got {fail}"
 
 
 def test_reports_unreachable_on_urlerror(monkeypatch):

@@ -54,6 +54,29 @@ context goes on the user side, not the system prompt).
 Capped at 8000 chars by the hermes-side ceiling; devagentic's
 `renderContext` does its own bounding upstream.
 
+## Requires `/graphql` over HTTP
+
+This plugin talks to devagentic's GraphQL surface at
+`<DEVAGENTIC_BASE_URL with /v1 stripped>/graphql`. Some devagentic
+deployments expose REST (e.g. `/v1/canvases`) but **not**
+`/graphql` over HTTP — in that case every `/doc` and `/fork`
+command surfaces `Reason: not found at <url>/graphql.` See
+[hermes-agent#21](https://github.com/TechDevGroup/hermes-agent/issues/21).
+
+Verify with:
+
+```bash
+curl -X POST <url>/graphql \
+     -H "Content-Type: application/json" \
+     -H "X-User-Id: <your-user-id>" \
+     -d '{"query":"{__typename}"}'
+```
+
+A `200` with `{"data":{"__typename":"Query"}}` means the surface
+is present. A `404` means it isn't — the plugin won't work
+against that deployment until devagentic-side ships the HTTP
+transport.
+
 ## Configuration
 
 Reuses the devagentic-local provider's environment, same as
