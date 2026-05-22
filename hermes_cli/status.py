@@ -108,6 +108,18 @@ def show_status(args):
     env_path = get_env_path()
     print(f"  .env file:    {check_mark(env_path.exists())} {'exists' if env_path.exists() else 'not found'}")
 
+    # When the hermes-namespaced .env is absent, surface any $HOME/.env so
+    # containerized / orchestrator-provisioned setups don't read as "no
+    # credentials at all" when the keys are right there on disk under a
+    # different convention (see #10).
+    if not env_path.exists():
+        home_env = Path.home() / ".env"
+        if home_env.exists() and home_env.resolve() != env_path.resolve():
+            print(
+                f"                  found {home_env} — not auto-loaded; "
+                f"run: set -a; source {home_env}; set +a"
+            )
+
     try:
         config = load_config()
     except Exception:
@@ -128,6 +140,8 @@ def show_status(args):
         "OpenAI": "OPENAI_API_KEY",
         "Anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"),
         "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        "Groq": "GROQ_API_KEY",
+        "Mistral": "MISTRAL_API_KEY",
         "DeepSeek": "DEEPSEEK_API_KEY",
         "xAI / Grok": "XAI_API_KEY",
         "NVIDIA NIM": "NVIDIA_API_KEY",
