@@ -873,6 +873,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     # ---------------------------------------------------------------------
 
     _register_canvas_tools(mcp)
+    _register_docs_tools(mcp)
 
     return mcp
 
@@ -1119,6 +1120,256 @@ def _register_canvas_tools(mcp: "FastMCP") -> None:
                         "devagentic unreachable)")
         return json.dumps({"count": len(matches),
                            "matches": matches}, indent=2)
+
+
+def _resolve_docs_client():
+    """Load the devagentic-docs plugin's HTTP client module. Same
+    file-path import pattern as `_resolve_canvas_client` (the
+    hyphenated `plugins/devagentic-docs/` directory can't be
+    addressed via `import plugins.devagentic_docs`).
+
+    Returns None when the plugin isn't present; tools then surface
+    `{"error": "docs plugin not available …"}` without crashing
+    the MCP server.
+    """
+    try:
+        import importlib.util
+        from pathlib import Path
+        plugin_dir = (Path(__file__).resolve().parent
+                      / "plugins" / "devagentic-docs")
+        client_path = plugin_dir / "client.py"
+        if not client_path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(
+            "_devagentic_docs_client", client_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:
+        logger.debug("docs MCP: plugin client unavailable: %s", exc)
+        return None
+
+
+def _register_docs_tools(mcp: "FastMCP") -> None:
+    """Register the devagentic-docs + fork tools on `mcp`. Mirrors
+    `_register_canvas_tools` shape (#56). Each tool is a thin
+    adapter around the devagentic-docs plugin client; failures
+    return `{"error": "<msg>"}` JSON strings without raising.
+
+    Tools registered (issue #24):
+      doc_search, doc_write, doc_show, fork_open, fork_decorate,
+      fork_get, fork_render.
+
+    Not registered (out-of-scope per #24): fork_close + fork_pin
+    depend on the local `$HERMES_HOME/docs-fork-active` marker,
+    which is session-local hermes state and doesn't translate to
+    MCP's stateless tool model.
+
+    Transport caveat: the underlying client talks to
+    `<DEVAGENTIC_BASE_URL>/graphql`, which not all devagentic
+    deployments expose over HTTP. See #21 — tools then surface
+    `{"error": "not found at <url>/graphql ..."}` via the
+    plugin's `last_error_text()`.
+    """
+
+    def _err(msg: str) -> str:
+        return json.dumps({"error": msg})
+
+    def _reason(c) -> str:
+        """Pull the client's last_error_text if available; empty
+        string otherwise so callers can append `f"{msg}{_reason(c)}"`
+        unconditionally."""
+        try:
+            t = c.last_error_text()
+        except Exception:  # noqa: BLE001
+            return ""
+        return f" ({t})" if t else ""
+
+    @mcp.tool()
+    def doc_search(query: str = "", limit: int = 10,
+                   tag: Optional[str] = None) -> str:
+        """Search the user's devagentic doc graph.
+
+        Args:
+            query: Free-text query. With `tag` set, applied as a
+                   client-side substring filter over the tag scope.
+                   Required when `tag` is empty.
+            limit: Max hits to return (clamped 1..100).
+            tag: Tag to scope to (routes to `Query.docs(tags:[t])`
+                 instead of `searchDocs(query, k)`).
+
+        Returns: JSON `{"count": N, "hits": [{id, content, tags,
+                 source, ts}, ...]}` or `{"error": ...}`.
+        """
+        c = _resolve_docs_client()
+        if c is None:
+            return _err("docs plugin not available on this hermes "
+                        "install (missing plugins/devagentic-docs/)")
+        if not query and not tag:
+            return _err("query or tag is required")
+        hits = c.search_docs(
+            query=query, limit=max(1, min(100, int(limit))),
+            tag=tag)
+        if hits is None:
+            return _err("doc_search failed" + _reason(c))
+        return json.dumps({"count": len(hits), "hits": hits},
+                          indent=2)
+
+    @mcp.tool()
+    def doc_write(content: str, tags: Optional[List[str]] = None,
+                  source: Optional[str] = None) -> str:
+        """Write a doc to the devagentic doc graph via writeDoc.
+
+        Args:
+            content: Doc body. Required.
+            tags: Optional list of tag strings. Tools that expect
+                  to be identifiable should include something like
+                  `source:<agent-name>` so doc-graph queries can
+                  filter authored finds by origin.
+            source: Optional canonical source label. Maps to the
+                    `source` argument on writeDoc.
+
+        Returns: JSON `{"id": "<doc-id>", ...}` or `{"error": ...}`.
+        """
+        c = _resolve_docs_client()
+        if c is None:
+            return _err("docs plugin not available")
+        if not content:
+            return _err("content is required")
+        doc = c.write_doc(
+            content=content, tags=list(tags or []), source=source)
+        if doc is None:
+            return _err("doc_write failed" + _reason(c))
+        return json.dumps(doc, indent=2)
+
+    @mcp.tool()
+    def doc_show(doc_id: str) -> str:
+        """Fetch a single doc by id (top-1 identity-verified
+        searchDocs match).
+
+        Args:
+            doc_id: The doc id.
+
+        Returns: JSON of the doc or `{"error": ...}`.
+        """
+        c = _resolve_docs_client()
+        if c is None:
+            return _err("docs plugin not available")
+        if not doc_id:
+            return _err("doc_id is required")
+        doc = c.get_doc(doc_id)
+        if doc is None:
+            return _err("doc_show failed" + _reason(c))
+        return json.dumps(doc, indent=2)
+
+    @mcp.tool()
+    def fork_open(parent_id: str, goal: Optional[str] = None,
+                  tags: Optional[List[str]] = None) -> str:
+        """Fork a devagentic context from a parent doc/context.
+
+        Wraps `forkContext(parentId, tags, annotations)`. The
+        `goal` argument (if set) is stored as a `goal` annotation;
+        the parent is auto-pinned as a `pinned-doc` annotation
+        (matches the `/fork open` slash-command contract).
+
+        Args:
+            parent_id: The id of the doc or context to fork from.
+            goal: Optional human-readable description of the fork's
+                  intent.
+            tags: Optional additional tags on the new context.
+
+        Returns: JSON of the new Context or `{"error": ...}`.
+        """
+        c = _resolve_docs_client()
+        if c is None:
+            return _err("docs plugin not available")
+        if not parent_id:
+            return _err("parent_id is required")
+        annotations: list[dict] = []
+        if goal:
+            annotations.append(
+                {"key": "goal", "value": goal, "weight": 1.0})
+        annotations.append(
+            {"key": "pinned-doc", "value": parent_id, "weight": 1.0})
+        ctx = c.fork_context(
+            parent_id=parent_id,
+            tags=list(tags or []) + ["source:hermes-mcp"],
+            annotations=annotations)
+        if ctx is None:
+            return _err("fork_open failed" + _reason(c))
+        return json.dumps(ctx, indent=2)
+
+    @mcp.tool()
+    def fork_decorate(ctx_id: str, key: str, value: str,
+                      weight: float = 1.0) -> str:
+        """Append an annotation to an existing context via
+        `decorateContext`.
+
+        Args:
+            ctx_id: The context id to decorate.
+            key: Annotation key (e.g. `pinned-doc`, `goal`,
+                 free-form labels).
+            value: Annotation value.
+            weight: Optional relative weight (defaults to 1.0).
+
+        Returns: JSON of the updated Context or `{"error": ...}`.
+        """
+        c = _resolve_docs_client()
+        if c is None:
+            return _err("docs plugin not available")
+        if not ctx_id or not key:
+            return _err("ctx_id and key are required")
+        updated = c.decorate_context(
+            ctx_id=ctx_id, key=key, value=value,
+            weight=float(weight))
+        if updated is None:
+            return _err("fork_decorate failed" + _reason(c))
+        return json.dumps(updated, indent=2)
+
+    @mcp.tool()
+    def fork_get(ctx_id: str) -> str:
+        """Fetch a context's id + tags + annotations via
+        `Query.context(id)`.
+
+        Args:
+            ctx_id: The context id.
+
+        Returns: JSON of the Context or `{"error": ...}`.
+        """
+        c = _resolve_docs_client()
+        if c is None:
+            return _err("docs plugin not available")
+        if not ctx_id:
+            return _err("ctx_id is required")
+        ctx = c.get_context(ctx_id)
+        if ctx is None:
+            return _err("fork_get failed" + _reason(c))
+        return json.dumps(ctx, indent=2)
+
+    @mcp.tool()
+    def fork_render(ctx_id: str) -> str:
+        """Call devagentic's `renderContext(ctxId)` to materialize
+        the context as a flat string. Useful for feeding pinned-doc
+        content into another agent's prompt.
+
+        Args:
+            ctx_id: The context id.
+
+        Returns: JSON `{"ctx_id": "...", "rendered": "..."}` or
+                 `{"error": ...}`.
+        """
+        c = _resolve_docs_client()
+        if c is None:
+            return _err("docs plugin not available")
+        if not ctx_id:
+            return _err("ctx_id is required")
+        rendered = c.render_context(ctx_id)
+        if rendered is None:
+            return _err("fork_render failed" + _reason(c))
+        return json.dumps({"ctx_id": ctx_id, "rendered": rendered},
+                          indent=2)
 
 
 # ---------------------------------------------------------------------------
