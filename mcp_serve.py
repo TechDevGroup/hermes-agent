@@ -856,7 +856,269 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         result = bridge.respond_to_approval(id, decision)
         return json.dumps(result, indent=2)
 
+    # ---------------------------------------------------------------------
+    # Canvas tools (issue #56) — devagentic canvas operations exposed as
+    # MCP tools. The devagentic-canvas plugin (#55) is the source of truth
+    # for the HTTP client; these tools just adapt its return shape to MCP's
+    # one-string-out convention.
+    #
+    # Auth: each tool calls the plugin client which threads X-User-Id +
+    # Authorization through to devagentic. The MCP host's bearer (typically
+    # set via the spawning hermes process's env) flows through naturally
+    # because we share the same DEVAGENTIC_API_KEY / DEVAGENTIC_USER_ID
+    # resolution.
+    #
+    # All errors from devagentic propagate as `{"error": "<msg>"}` JSON
+    # strings — no MCP tool ever raises.
+    # ---------------------------------------------------------------------
+
+    _register_canvas_tools(mcp)
+
     return mcp
+
+
+def _resolve_canvas_client():
+    """Load the devagentic-canvas plugin's HTTP client module. The
+    plugin's directory is hyphenated (`plugins/devagentic-canvas/`),
+    which Python's standard `import plugins.devagentic_canvas` can't
+    resolve — so we load by file path. Returns None when the plugin
+    isn't present (the MCP tools then return error JSON to the host
+    without crashing the server)."""
+    try:
+        import importlib.util
+        from pathlib import Path
+        plugin_dir = (Path(__file__).resolve().parent
+                      / "plugins" / "devagentic-canvas")
+        client_path = plugin_dir / "client.py"
+        if not client_path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(
+            "_devagentic_canvas_client", client_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:
+        logger.debug("canvas MCP: plugin client unavailable: %s", exc)
+        return None
+
+
+def _register_canvas_tools(mcp: "FastMCP") -> None:
+    """Register the devagentic canvas tools on `mcp`. Pulled into its
+    own function so the create_mcp_server body stays readable and
+    tests can drive the registration in isolation.
+
+    Tools registered (issue #56):
+      canvas_list, canvas_open, canvas_add_node, canvas_move_node,
+      canvas_update_node, canvas_delete_node, canvas_link_nodes,
+      canvas_delete_edge, canvas_search.
+    """
+
+    def _err(msg: str) -> str:
+        return json.dumps({"error": msg})
+
+    @mcp.tool()
+    def canvas_list() -> str:
+        """List the authenticated user's devagentic canvases.
+
+        Auth: uses the same X-User-Id resolution as the
+        devagentic-canvas plugin — `DEVAGENTIC_USER_ID` env or
+        the active hermes profile. Bearer token from
+        `DEVAGENTIC_API_KEY`.
+
+        Returns: JSON with `{"count": N, "canvases": [...]}` on
+        success or `{"error": ...}` on failure.
+        """
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available on this hermes "
+                        "install (missing plugins/devagentic-canvas/)")
+        canvases = c.list_canvases()
+        if canvases is None:
+            return _err("devagentic unreachable or auth failed; "
+                        "check DEVAGENTIC_BASE_URL + DEVAGENTIC_USER_ID")
+        return json.dumps({"count": len(canvases),
+                           "canvases": canvases}, indent=2)
+
+    @mcp.tool()
+    def canvas_open(canvas_id: str) -> str:
+        """Get the full state of a canvas: metadata + nodes + edges.
+
+        Args:
+            canvas_id: The canvas id (from canvas_list).
+        """
+        if not canvas_id:
+            return _err("canvas_id is required")
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available")
+        state = c.get_canvas(canvas_id)
+        if state is None:
+            return _err(f"canvas {canvas_id!r} not found or "
+                        "devagentic unreachable")
+        return json.dumps(state, indent=2)
+
+    @mcp.tool()
+    def canvas_add_node(canvas_id: str, node_type: str,
+                        position_x: Optional[float] = None,
+                        position_y: Optional[float] = None) -> str:
+        """Add a node to a canvas.
+
+        Args:
+            canvas_id: The canvas id.
+            node_type: The node kind label (e.g. `doc`, `assertion`,
+                       `decision`).
+            position_x: Optional x coordinate.
+            position_y: Optional y coordinate.
+        """
+        if not canvas_id or not node_type:
+            return _err("canvas_id and node_type are required")
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available")
+        pos = None
+        if position_x is not None and position_y is not None:
+            pos = {"x": float(position_x), "y": float(position_y)}
+        node = c.add_node(canvas_id, node_type, position=pos)
+        if node is None:
+            return _err("add_node failed (canvas missing or "
+                        "devagentic unreachable)")
+        return json.dumps(node, indent=2)
+
+    @mcp.tool()
+    def canvas_move_node(canvas_id: str, node_id: str,
+                         x: float, y: float) -> str:
+        """Reposition a node on a canvas.
+
+        Args:
+            canvas_id: The canvas id.
+            node_id: The node id.
+            x: The new x coordinate.
+            y: The new y coordinate.
+        """
+        if not canvas_id or not node_id:
+            return _err("canvas_id and node_id are required")
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available")
+        out = c.move_node(canvas_id, node_id, x, y)
+        if out is None:
+            return _err("move_node failed")
+        return json.dumps(out, indent=2)
+
+    @mcp.tool()
+    def canvas_update_node(canvas_id: str, node_id: str,
+                           fields_json: str) -> str:
+        """Partially update a node's fields.
+
+        Args:
+            canvas_id: The canvas id.
+            node_id: The node id.
+            fields_json: JSON object of fields to merge into the
+                         node (e.g. `{"node_type": "decision"}`,
+                         `{"body": {"content": "..."}}`).
+        """
+        if not canvas_id or not node_id:
+            return _err("canvas_id and node_id are required")
+        try:
+            fields = json.loads(fields_json)
+        except json.JSONDecodeError as exc:
+            return _err(f"fields_json is not valid JSON: {exc}")
+        if not isinstance(fields, dict) or not fields:
+            return _err("fields_json must be a non-empty JSON object")
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available")
+        out = c.update_node(canvas_id, node_id, fields)
+        if out is None:
+            return _err("update_node failed")
+        return json.dumps(out, indent=2)
+
+    @mcp.tool()
+    def canvas_delete_node(canvas_id: str, node_id: str) -> str:
+        """Delete a node (and any incident edges, depending on
+        devagentic's cascade behavior).
+
+        Args:
+            canvas_id: The canvas id.
+            node_id: The node id to remove.
+        """
+        if not canvas_id or not node_id:
+            return _err("canvas_id and node_id are required")
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available")
+        out = c.delete_node(canvas_id, node_id)
+        if out is None:
+            return _err("delete_node failed")
+        return json.dumps(out, indent=2)
+
+    @mcp.tool()
+    def canvas_link_nodes(canvas_id: str, source_id: str,
+                          target_id: str,
+                          edge_type: str = "links") -> str:
+        """Author an edge between two nodes.
+
+        Args:
+            canvas_id: The canvas id.
+            source_id: Source node id.
+            target_id: Target node id.
+            edge_type: Optional edge label (default: `links`).
+        """
+        if not canvas_id or not source_id or not target_id:
+            return _err("canvas_id, source_id, target_id all required")
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available")
+        out = c.link_nodes(canvas_id, source_id, target_id,
+                           edge_type=edge_type)
+        if out is None:
+            return _err("link_nodes failed")
+        return json.dumps(out, indent=2)
+
+    @mcp.tool()
+    def canvas_delete_edge(canvas_id: str, edge_id: str) -> str:
+        """Delete an edge from a canvas.
+
+        Args:
+            canvas_id: The canvas id.
+            edge_id: The edge id to remove.
+        """
+        if not canvas_id or not edge_id:
+            return _err("canvas_id and edge_id are required")
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available")
+        out = c.delete_edge(canvas_id, edge_id)
+        if out is None:
+            return _err("delete_edge failed")
+        return json.dumps(out, indent=2)
+
+    @mcp.tool()
+    def canvas_search(canvas_id: str, query: str) -> str:
+        """Search a canvas's nodes by keyword (case-insensitive
+        substring match against node body / name / node_type).
+
+        v0 — client-side filter over the full canvas state.
+        Server-side search is deferred (devagentic doesn't ship
+        a `/search` endpoint yet).
+
+        Args:
+            canvas_id: The canvas id.
+            query: Substring to search for.
+        """
+        if not canvas_id or not query:
+            return _err("canvas_id and query are required")
+        c = _resolve_canvas_client()
+        if c is None:
+            return _err("canvas plugin not available")
+        matches = c.search_canvas(canvas_id, query)
+        if matches is None:
+            return _err("canvas_search failed (canvas missing or "
+                        "devagentic unreachable)")
+        return json.dumps({"count": len(matches),
+                           "matches": matches}, indent=2)
 
 
 # ---------------------------------------------------------------------------

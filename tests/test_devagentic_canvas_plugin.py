@@ -139,6 +139,136 @@ def test_client_no_user_id_returns_none(plugin_pkg, monkeypatch):
     assert plugin_pkg.client._request("GET", "es") is None
 
 
+# ─── Client mutations (issue #56 MCP surface) ───────────────
+
+def test_client_add_node_posts_to_nodes_route(plugin_pkg, monkeypatch):
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    captured: dict = {}
+
+    def _capture(method, path, body=None, **k):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "node-NEW", "node_type": body.get("node_type")}
+    monkeypatch.setattr(plugin_pkg.client, "_request", _capture)
+    node = plugin_pkg.client.add_node(
+        "canvas-123", "decision",
+        position={"x": 12.0, "y": 34.0})
+    assert node["id"] == "node-NEW"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/canvas-123/nodes"
+    assert captured["body"]["node_type"] == "decision"
+    assert captured["body"]["position"] == {"x": 12.0, "y": 34.0}
+
+
+def test_client_add_node_requires_canvas_and_type(plugin_pkg):
+    assert plugin_pkg.client.add_node("", "decision") is None
+    assert plugin_pkg.client.add_node("canvas-x", "") is None
+
+
+def test_client_update_node_patches_with_fields(plugin_pkg, monkeypatch):
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    captured: dict = {}
+
+    def _capture(method, path, body=None, **k):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "n1", "node_type": "decision"}
+    monkeypatch.setattr(plugin_pkg.client, "_request", _capture)
+    out = plugin_pkg.client.update_node(
+        "c1", "n1", {"node_type": "decision"})
+    assert out["node_type"] == "decision"
+    assert captured["method"] == "PATCH"
+    assert captured["path"] == "/c1/nodes/n1"
+    assert captured["body"] == {"node_type": "decision"}
+
+
+def test_client_move_node_wraps_update(plugin_pkg, monkeypatch):
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    captured: dict = {}
+
+    def _capture(method, path, body=None, **k):
+        captured["body"] = body
+        return {"id": "n1", "position": body["position"]}
+    monkeypatch.setattr(plugin_pkg.client, "_request", _capture)
+    out = plugin_pkg.client.move_node("c1", "n1", 5, 7)
+    assert out["position"] == {"x": 5.0, "y": 7.0}
+    assert captured["body"]["position"] == {"x": 5.0, "y": 7.0}
+
+
+def test_client_delete_node(plugin_pkg, monkeypatch):
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    monkeypatch.setattr(
+        plugin_pkg.client, "_request",
+        lambda method, path, body=None, **k:
+            {"deleted": True, "method": method, "path": path})
+    out = plugin_pkg.client.delete_node("c1", "n1")
+    assert out["deleted"] is True
+    assert out["method"] == "DELETE"
+    assert out["path"] == "/c1/nodes/n1"
+
+
+def test_client_link_nodes(plugin_pkg, monkeypatch):
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    captured: dict = {}
+
+    def _capture(method, path, body=None, **k):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return {"id": "edge-NEW", **body}
+    monkeypatch.setattr(plugin_pkg.client, "_request", _capture)
+    edge = plugin_pkg.client.link_nodes(
+        "c1", "src", "dst", edge_type="depends-on")
+    assert edge["id"] == "edge-NEW"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/c1/edges"
+    assert captured["body"] == {
+        "source": "src", "target": "dst",
+        "edge_type": "depends-on",
+    }
+
+
+def test_client_delete_edge(plugin_pkg, monkeypatch):
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    monkeypatch.setattr(
+        plugin_pkg.client, "_request",
+        lambda method, path, body=None, **k:
+            {"deleted": True, "path": path})
+    out = plugin_pkg.client.delete_edge("c1", "e1")
+    assert out["deleted"] is True
+    assert out["path"] == "/c1/edges/e1"
+
+
+def test_client_search_filters_nodes(plugin_pkg, monkeypatch):
+    monkeypatch.setattr(
+        plugin_pkg.client, "get_canvas",
+        lambda cid, **k: {
+            "nodes": [
+                {"id": "n1", "node_type": "doc",
+                 "body": "refactor the auth flow"},
+                {"id": "n2", "node_type": "doc",
+                 "body": "unrelated note about deploys"},
+                {"id": "n3", "node_type": "decision",
+                 "name": "auth-rule"},
+            ],
+        })
+    matches = plugin_pkg.client.search_canvas("c1", "auth")
+    ids = sorted(m["id"] for m in matches)
+    assert ids == ["n1", "n3"]
+    # Empty query / no canvas id → None.
+    assert plugin_pkg.client.search_canvas("c1", "") is None
+    assert plugin_pkg.client.search_canvas("", "x") is None
+
+
+def test_client_search_returns_none_on_canvas_miss(
+        plugin_pkg, monkeypatch):
+    monkeypatch.setattr(plugin_pkg.client, "get_canvas",
+                        lambda cid, **k: None)
+    assert plugin_pkg.client.search_canvas("c1", "x") is None
+
+
 # ─── Active-canvas marker ───────────────────────────────────
 
 def test_active_canvas_marker_roundtrip(plugin_pkg):

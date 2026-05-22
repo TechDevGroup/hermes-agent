@@ -132,3 +132,116 @@ def create_canvas(name: str, description: str = "",
     if tags:
         body["tags"] = list(tags)
     return _request("POST", "", body=body, timeout=timeout)
+
+
+# --- Mutations: nodes + edges (issue #56 MCP surface) -------
+
+def add_node(canvas_id: str, node_type: str,
+             position: Optional[dict] = None,
+             *,
+             timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
+    """POST /v1/canvas/{id}/nodes — add a node to a canvas.
+    `node_type` is the kind label (e.g. `doc`, `assertion`); the
+    `position` dict is `{x, y}` if known. Returns the new node
+    dict on success."""
+    if not canvas_id or not node_type:
+        return None
+    body: dict[str, Any] = {"node_type": node_type}
+    if position:
+        body["position"] = dict(position)
+    return _request("POST", f"/{canvas_id}/nodes",
+                    body=body, timeout=timeout)
+
+
+def update_node(canvas_id: str, node_id: str,
+                fields: dict,
+                *,
+                timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
+    """PATCH /v1/canvas/{id}/nodes/{node_id} — partial update.
+    `fields` is the merge payload (e.g. {"node_type": "decision"}
+    or {"position": {"x": 12, "y": 34}}). Returns the updated
+    node dict on success."""
+    if not canvas_id or not node_id or not fields:
+        return None
+    return _request("PATCH", f"/{canvas_id}/nodes/{node_id}",
+                    body=dict(fields), timeout=timeout)
+
+
+def move_node(canvas_id: str, node_id: str,
+              x: float, y: float,
+              *,
+              timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
+    """Convenience around `update_node` for repositioning. The
+    underlying REST surface treats moves as a `position`-only
+    update; this wrapper makes the MCP tool surface explicit."""
+    return update_node(canvas_id, node_id,
+                       {"position": {"x": float(x), "y": float(y)}},
+                       timeout=timeout)
+
+
+def delete_node(canvas_id: str, node_id: str,
+                *,
+                timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
+    """DELETE /v1/canvas/{id}/nodes/{node_id} — drop a node.
+    Returns the `{deleted: true, ...}` envelope on success."""
+    if not canvas_id or not node_id:
+        return None
+    return _request("DELETE", f"/{canvas_id}/nodes/{node_id}",
+                    timeout=timeout)
+
+
+def link_nodes(canvas_id: str, source_id: str, target_id: str,
+               edge_type: str = "links",
+               *,
+               timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
+    """POST /v1/canvas/{id}/edges — author an edge between two
+    nodes. `edge_type` is a free-form label. Returns the new
+    edge dict on success."""
+    if not canvas_id or not source_id or not target_id:
+        return None
+    body = {
+        "source": source_id, "target": target_id,
+        "edge_type": edge_type,
+    }
+    return _request("POST", f"/{canvas_id}/edges",
+                    body=body, timeout=timeout)
+
+
+def delete_edge(canvas_id: str, edge_id: str,
+                *,
+                timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
+    """DELETE /v1/canvas/{id}/edges/{edge_id} — drop an edge.
+    Returns the `{deleted: true, ...}` envelope on success."""
+    if not canvas_id or not edge_id:
+        return None
+    return _request("DELETE", f"/{canvas_id}/edges/{edge_id}",
+                    timeout=timeout)
+
+
+def search_canvas(canvas_id: str, query: str,
+                  *,
+                  timeout: float = _DEFAULT_TIMEOUT) -> Optional[list[dict]]:
+    """Client-side keyword search over a canvas's nodes. v0 — the
+    REST surface doesn't ship a server-side search endpoint, so
+    this fetches the full canvas state and filters nodes whose
+    `body` / `name` / `node_type` field contains the query
+    (case-insensitive substring match). Returns the list of
+    matching node dicts, or None on fetch failure."""
+    if not canvas_id or not query:
+        return None
+    state = get_canvas(canvas_id, timeout=timeout)
+    if state is None:
+        return None
+    q = query.lower()
+    matches: list[dict] = []
+    for n in state.get("nodes") or []:
+        haystack_fields = [
+            str(n.get("node_type") or ""),
+            str(n.get("name") or ""),
+            str(n.get("body") or ""),
+            str((n.get("body") or {}).get("content") or "")
+            if isinstance(n.get("body"), dict) else "",
+        ]
+        if any(q in f.lower() for f in haystack_fields):
+            matches.append(n)
+    return matches
