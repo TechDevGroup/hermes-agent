@@ -438,6 +438,12 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
     batch_reasoning_stats = {"total_assistant_turns": 0, "turns_with_reasoning": 0, "turns_without_reasoning": 0}
     completed_in_batch = []
     discarded_no_reasoning = 0
+    # Failure tracking (issue #28). Successes-only persistence in
+    # batch_N.jsonl means per-prompt errors are otherwise invisible
+    # after the run completes.
+    failed_in_batch = 0
+    error_samples: List[Dict[str, Any]] = []
+    _MAX_SAMPLES_PER_BATCH = 3
     
     # Process each prompt sequentially in this batch
     for prompt_index, prompt_data in prompts_to_process:
@@ -509,6 +515,13 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
             status = "⚠️  partial" if result.get("partial") else "✅"
             print(f"   {status} Prompt {prompt_index} completed")
         else:
+            failed_in_batch += 1
+            err_msg = str(result.get("error") or "unknown")[:200]
+            if len(error_samples) < _MAX_SAMPLES_PER_BATCH:
+                error_samples.append({
+                    "prompt_index": prompt_index,
+                    "error": err_msg,
+                })
             print(f"   ❌ Prompt {prompt_index} failed (will retry on resume)")
     
     print(f"✅ Batch {batch_num}: Completed ({len(prompts_to_process)} prompts processed)")
@@ -520,7 +533,11 @@ def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
         "tool_stats": batch_tool_stats,
         "reasoning_stats": batch_reasoning_stats,
         "discarded_no_reasoning": discarded_no_reasoning,
-        "completed_prompts": completed_in_batch
+        "completed_prompts": completed_in_batch,
+        # Failure visibility (issue #28). Persists what was previously
+        # only emitted via stdout `❌` lines and lost after the run.
+        "failed": failed_in_batch,
+        "error_samples": error_samples,
     }
 
 
@@ -1069,6 +1086,23 @@ class BatchRunner:
             print(f"⚠️  Filtered {filtered_entries} corrupted entries out of {total_entries} total")
         print(f"✅ Combined {batch_files_found} batch files into trajectories.jsonl ({total_entries - filtered_entries} entries)")
         
+        # Aggregate per-prompt failure visibility (#28). Workers
+        # return `failed` counts + a capped `error_samples` list.
+        total_failed = sum(r.get("failed", 0) for r in results)
+        total_processed_attempts = sum(
+            r.get("processed", 0) for r in results)
+        all_error_samples: List[Dict[str, Any]] = []
+        for r in results:
+            for sample in (r.get("error_samples") or []):
+                if len(all_error_samples) >= 10:
+                    break
+                all_error_samples.append(sample)
+            if len(all_error_samples) >= 10:
+                break
+        failure_rate = (
+            round(total_failed / total_processed_attempts * 100, 2)
+            if total_processed_attempts > 0 else 0.0)
+
         # Save final statistics
         final_stats = {
             "run_name": self.run_name,
@@ -1081,6 +1115,12 @@ class BatchRunner:
             "duration_seconds": round(time.time() - start_time, 2),
             "tool_statistics": total_tool_stats,
             "reasoning_statistics": total_reasoning_stats,
+            # #28 additions — additive, never invalidates a prior
+            # consumer that only reads tool_statistics.
+            "prompts_processed_attempts": total_processed_attempts,
+            "prompts_failed": total_failed,
+            "failure_rate": failure_rate,
+            "error_samples": all_error_samples,
         }
         
         with open(self.stats_file, 'w', encoding='utf-8') as f:
@@ -1091,6 +1131,18 @@ class BatchRunner:
         print("📊 BATCH PROCESSING COMPLETE")
         print("=" * 70)
         print(f"✅ Prompts processed this run: {sum(r.get('processed', 0) for r in results)}")
+        if total_failed:
+            print(f"❌ Prompts failed: {total_failed} "
+                  f"({failure_rate}% failure rate)")
+            if all_error_samples:
+                print("   Sample errors:")
+                for s in all_error_samples[:3]:
+                    pidx = s.get("prompt_index", "?")
+                    err = (s.get("error") or "")[:140]
+                    print(f"     - prompt {pidx}: {err}")
+                if len(all_error_samples) > 3:
+                    print(f"     ... and {len(all_error_samples) - 3} "
+                          "more in statistics.json")
         print(f"✅ Total trajectories in merged file: {total_entries - filtered_entries}")
         print(f"✅ Total batch files merged: {batch_files_found}")
         print(f"⏱️  Total duration: {round(time.time() - start_time, 2)}s")
