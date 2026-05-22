@@ -457,6 +457,145 @@ def _check_cron_scheduler() -> None:
     # stay quiet when nothing is wrong.
 
 
+def _format_uptime(seconds: float) -> str:
+    """Render a uptime delta as `Xh Ym` (or `Ym Zs` under an hour).
+    Used by the gateway runtime probe (#30)."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes}m {int(seconds % 60)}s"
+    hours = minutes // 60
+    return f"{hours}h {minutes % 60}m"
+
+
+def _check_gateway_runtime() -> None:
+    """Probe the hermes gateway's runtime status when it's been
+    started at least once. Inert when the runtime status file is
+    absent (gateway never ran — byte-stable default).
+
+    Surfaces three signals operators expect from `hermes doctor`
+    but currently only have via the gateway's stdout / systemd
+    journal:
+
+    1. Gateway state — running / degraded / startup_failed / stopped.
+       The first three are actionable; stopped just means the
+       operator stopped it intentionally.
+    2. Uptime (when running).
+    3. Per-platform health — any platform in fatal or paused state
+       is surfaced as a warn row.
+
+    See #30.
+    """
+    try:
+        from gateway.status import read_runtime_status
+        from hermes_cli.gateway import find_gateway_pids
+    except Exception as exc:  # noqa: BLE001
+        check_warn("Gateway runtime module not importable", str(exc))
+        return
+
+    try:
+        status = read_runtime_status()
+    except Exception as exc:  # noqa: BLE001
+        check_warn("Gateway runtime status unreadable", str(exc))
+        return
+
+    if not status:
+        return  # Gateway never started — no section to show.
+
+    state = (status.get("gateway_state") or "").lower()
+    exit_reason = status.get("exit_reason") or ""
+    updated_at = status.get("updated_at") or ""
+    start_time = status.get("start_time")
+    try:
+        pids = find_gateway_pids()
+    except Exception:
+        pids = []
+
+    _section("Gateway Runtime")
+
+    # Compute uptime if we can.
+    uptime_str = ""
+    if start_time:
+        try:
+            import time as _time
+            uptime_str = _format_uptime(_time.time() - float(start_time))
+        except (TypeError, ValueError):
+            uptime_str = ""
+
+    pid_str = (
+        f"PID {', '.join(str(p) for p in pids)}"
+        if pids else "no live PID found")
+
+    if state == "running" and pids:
+        detail_parts = [pid_str]
+        if uptime_str:
+            detail_parts.append(f"uptime {uptime_str}")
+        active_agents = status.get("active_agents")
+        if isinstance(active_agents, int):
+            detail_parts.append(f"{active_agents} active agent(s)")
+        check_ok("Gateway running", " · ".join(detail_parts))
+    elif state == "degraded":
+        detail_parts = [pid_str]
+        if uptime_str:
+            detail_parts.append(f"uptime {uptime_str}")
+        detail_parts.append("see platform errors below")
+        check_warn("Gateway degraded", " · ".join(detail_parts))
+    elif state == "startup_failed":
+        reason = (
+            f"Exit reason: {exit_reason!r}"
+            if exit_reason else "no exit reason recorded")
+        if updated_at:
+            reason += f" · last seen {updated_at}"
+        check_fail("Gateway startup_failed", reason)
+    elif state == "stopped":
+        reason = exit_reason or "no exit reason recorded"
+        check_info(f"Gateway stopped — {reason}"
+                   + (f" · last seen {updated_at}" if updated_at
+                      else ""))
+    elif state in ("starting", "draining"):
+        check_info(f"Gateway {state}" + (
+            f" · {pid_str}" if pids else " · no PID yet"))
+    elif pids and not state:
+        # PID present but no recorded state — likely an old gateway
+        # build that pre-dates gateway_state tracking.
+        check_warn("Gateway running but no recorded state",
+                   pid_str)
+    else:
+        check_warn(f"Gateway state {state!r} (no PID)",
+                   exit_reason or "stale status file")
+
+    # Per-platform health.
+    platforms = status.get("platforms") or {}
+    if not isinstance(platforms, dict) or not platforms:
+        return
+    rough_states: dict[str, list[str]] = {}
+    for pname, pinfo in platforms.items():
+        if not isinstance(pinfo, dict):
+            continue
+        pstate = (pinfo.get("platform_state") or "").lower()
+        rough_states.setdefault(pstate or "unknown", []).append(pname)
+
+    healthy = rough_states.get("connected", [])
+    bad = (rough_states.get("fatal", [])
+           + rough_states.get("paused", [])
+           + rough_states.get("retrying", []))
+    if healthy:
+        check_info(f"Platforms connected: {', '.join(sorted(healthy))}")
+    for pname in bad:
+        pinfo = platforms[pname]
+        pstate = (pinfo.get("platform_state") or "").lower()
+        err = (pinfo.get("error_message") or pinfo.get("error_code")
+               or "")[:120]
+        marker = "fail" if pstate == "fatal" else "warn"
+        text = f"Platform {pname}: {pstate}"
+        detail = err
+        if marker == "fail":
+            check_fail(text, detail)
+        else:
+            check_warn(text, detail)
+
+
 _APIKEY_PROVIDERS_CACHE: list | None = None
 
 
@@ -2134,6 +2273,7 @@ def run_doctor(args):
 
     _check_devagentic_graph()
     _check_cron_scheduler()
+    _check_gateway_runtime()
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
