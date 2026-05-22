@@ -238,6 +238,123 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         check_warn("Could not verify systemd linger", f"({linger_detail})")
 
 
+def _check_devagentic_graph() -> None:
+    """Probe devagentic's GraphQL surface when skills or memory graph
+    mode is enabled. Surfaces the specific failure kind (auth /
+    unreachable / not found / user_id unresolved) instead of leaving
+    the operator to grep DEBUG logs (see #17).
+
+    Silent when both adapters are in default file-fallback mode.
+    """
+    import json as _json
+    import os as _os
+    import urllib.error as _urllib_error
+    import urllib.request as _urllib_request
+
+    try:
+        from agent.devagentic_skills import (
+            graph_enabled as _skills_enabled,
+            _base_url as _skills_base,
+        )
+        from agent.devagentic_memory import graph_enabled as _memory_enabled
+    except Exception as exc:
+        # Adapters always import; a failure here would be a hermes
+        # packaging defect, not something the operator can fix.
+        check_warn("Devagentic graph adapters not importable", str(exc))
+        return
+
+    skills_on = _skills_enabled()
+    memory_on = _memory_enabled()
+    if not (skills_on or memory_on):
+        # File-fallback path is the byte-stable default. Don't print
+        # a section header for the silent case — that's the canonical
+        # operational mode for users who never wired devagentic.
+        return
+
+    _section("Devagentic Graph")
+    enabled_modes = []
+    if skills_on:
+        enabled_modes.append("skills")
+    if memory_on:
+        enabled_modes.append("memory")
+    check_info(f"Graph mode active for: {', '.join(enabled_modes)}")
+
+    base = _skills_base()
+    user = (_os.environ.get("DEVAGENTIC_USER_ID") or "").strip()
+    if not user:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            user = (get_active_profile_name() or "").strip()
+        except Exception:
+            user = ""
+    if not user:
+        check_fail(
+            "DEVAGENTIC_USER_ID unresolved",
+            "set DEVAGENTIC_USER_ID or run inside a hermes profile",
+        )
+        return
+
+    api_key = (_os.environ.get("DEVAGENTIC_API_KEY") or "").strip()
+    body = _json.dumps(
+        {"query": "{ __typename }", "variables": {}}).encode("utf-8")
+    req = _urllib_request.Request(
+        f"{base}/graphql", data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    req.add_header("X-User-Id", user)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with _urllib_request.urlopen(req, timeout=4.0) as resp:
+            raw = resp.read().decode("utf-8")
+    except _urllib_error.HTTPError as exc:
+        if exc.code in (401, 403):
+            check_fail(
+                "Devagentic GraphQL: auth failed",
+                "set DEVAGENTIC_API_KEY (any non-empty value when "
+                "devagentic runs in DEVAGENTIC_TRUST_HEADER=1 mode)",
+            )
+        elif exc.code == 404:
+            check_fail(
+                "Devagentic GraphQL: not found",
+                f"{base}/graphql returned 404 — verify "
+                "DEVAGENTIC_BASE_URL points at a graph-enabled instance",
+            )
+        else:
+            check_fail(
+                f"Devagentic GraphQL: HTTP {exc.code}",
+                f"unexpected status from {base}/graphql",
+            )
+        return
+    except (_urllib_error.URLError, OSError, TimeoutError) as exc:
+        check_fail(
+            "Devagentic GraphQL: unreachable",
+            f"{base}/graphql — {exc}",
+        )
+        return
+
+    try:
+        payload = _json.loads(raw)
+    except Exception as exc:
+        check_warn("Devagentic GraphQL: response not JSON", str(exc))
+        return
+    if not isinstance(payload, dict):
+        check_warn("Devagentic GraphQL: unexpected response shape",
+                   "response was not a JSON object")
+        return
+    if payload.get("errors"):
+        check_warn(
+            "Devagentic GraphQL: returned errors",
+            str(payload.get("errors"))[:200],
+        )
+        return
+    check_ok(
+        "Devagentic GraphQL reachable",
+        f"{base}/graphql — auth + user_id OK",
+    )
+
+
 _APIKEY_PROVIDERS_CACHE: list | None = None
 
 
@@ -1912,6 +2029,8 @@ def run_doctor(args):
                 check_warn(f"{_active_memory_provider} plugin not found", "run: hermes memory setup")
         except Exception as _e:
             check_warn(f"{_active_memory_provider} check failed", str(_e))
+
+    _check_devagentic_graph()
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
