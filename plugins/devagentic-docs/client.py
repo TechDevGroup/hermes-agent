@@ -141,22 +141,47 @@ def search_docs(query: str, limit: int = 10,
                 tag: Optional[str] = None,
                 *, timeout: float = _DEFAULT_TIMEOUT
                 ) -> Optional[list[dict]]:
-    """searchDocs(query, limit, tag) → list of {id, content, tags,
-    score}. Returns None on any failure (caller falls through);
-    empty list when the search succeeds but returns no hits.
+    """Search the user's doc graph and return [{id, content, tags,
+    source, ts}, ...]. Returns None on any failure (caller falls
+    through); empty list when the search succeeds with no hits.
+
+    `--tag` and free-text `query` map to different devagentic
+    primitives in the current schema: `Query.docs(tags:[t])` is the
+    tag-scoped browser; `Query.searchDocs(query, k)` is the lexical
+    + embedding ranker. We route based on which is set:
+      tag set       → docs(tags:[t]); slice client-side to `limit`
+      tag unset     → searchDocs(query, k=limit)
     """
-    if not query:
-        _record_error("query is required")
+    if not query and not tag:
+        _record_error("query or --tag is required")
         return None
+    if tag:
+        gql = (
+            "query($t:[String!]){"
+            " docs(tags:$t){ id content tags source ts }"
+            "}"
+        )
+        data = _post_graphql(gql, {"t": [tag]}, timeout=timeout)
+        if data is None:
+            return None
+        hits = data.get("docs") or []
+        if not isinstance(hits, list):
+            return []
+        # docs() returns everything matching the tag; the user's
+        # `limit` is a display cap.
+        if query:
+            # Free-text filter within the tag scope.
+            q_lower = query.lower()
+            hits = [h for h in hits
+                    if q_lower in (h.get("content") or "").lower()]
+        return hits[: max(1, int(limit))]
     gql = (
-        "query($q:String!,$l:Int,$t:String){"
-        " searchDocs(query:$q,limit:$l,tag:$t){ id content tags score }"
+        "query($q:String!,$k:Int){"
+        " searchDocs(query:$q, k:$k){ id content tags source ts }"
         "}"
     )
-    variables: dict[str, Any] = {"q": query, "l": int(limit)}
-    if tag:
-        variables["t"] = tag
-    data = _post_graphql(gql, variables, timeout=timeout)
+    data = _post_graphql(gql, {"q": query, "k": int(limit)},
+                         timeout=timeout)
     if data is None:
         return None
     hits = data.get("searchDocs")
@@ -193,14 +218,14 @@ def get_doc(doc_id: str, *,
             timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
     """Fetch a single doc by id via searchDocs (devagentic's
     canonical retrieval primitive — there is no GET /doc/<id>
-    GraphQL field in the current surface). Filters down to the
-    requested id from a limit=1-by-id lookup."""
+    GraphQL field in the current surface). Issues a `k=1` search
+    keyed on the id string and verifies the top hit's id matches."""
     if not doc_id:
         _record_error("doc_id is required")
         return None
     gql = (
         "query($q:String!){"
-        " searchDocs(query:$q, limit:1){ id content tags }"
+        " searchDocs(query:$q, k:1){ id content tags source ts }"
         "}"
     )
     data = _post_graphql(gql, {"q": doc_id}, timeout=timeout)
@@ -210,10 +235,108 @@ def get_doc(doc_id: str, *,
     if not isinstance(hits, list) or not hits:
         _record_error(f"no doc matched id={doc_id}")
         return None
-    # searchDocs is lexical+embedding — verify the top hit's id
     top = hits[0]
     if (top.get("id") or "") != doc_id:
         _record_error(
             f"top match was {top.get('id')!r}, not requested {doc_id!r}")
         return None
     return top
+
+
+# --- Fork / context surface (issue #12 follow-up) ----------
+
+def fork_context(parent_id: str,
+                  tags: Optional[list[str]] = None,
+                  annotations: Optional[list[dict]] = None,
+                  *,
+                  timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
+    """Wrap `forkContext(parentId, tags, annotations)`. Returns the
+    new Context dict ({id, ts, tags, annotations, ...}) on success.
+    `annotations` is a list of {key, value, weight} dicts."""
+    if not parent_id:
+        _record_error("parent_id is required")
+        return None
+    gql = (
+        "mutation($p:String!,$t:[String!],$a:[AnnotationInput!]){"
+        " forkContext(parentId:$p, tags:$t, annotations:$a){"
+        "   id ts tags annotations{ key value weight }"
+        " }"
+        "}"
+    )
+    variables: dict[str, Any] = {"p": parent_id}
+    if tags:
+        variables["t"] = list(tags)
+    if annotations:
+        variables["a"] = [
+            {"key": a.get("key"), "value": a.get("value"),
+             "weight": a.get("weight", 1.0)}
+            for a in annotations]
+    data = _post_graphql(gql, variables, timeout=timeout)
+    if data is None:
+        return None
+    return data.get("forkContext") or None
+
+
+def decorate_context(ctx_id: str, key: str, value: str,
+                     weight: float = 1.0,
+                     *,
+                     timeout: float = _DEFAULT_TIMEOUT
+                     ) -> Optional[dict]:
+    """Wrap `decorateContext(ctxId, annotation)`. Returns the updated
+    Context dict on success. One annotation per call (the schema's
+    AnnotationInput is scalar)."""
+    if not ctx_id or not key:
+        _record_error("ctx_id and key are required")
+        return None
+    gql = (
+        "mutation($c:String!,$a:AnnotationInput!){"
+        " decorateContext(ctxId:$c, annotation:$a){"
+        "   id annotations{ key value weight }"
+        " }"
+        "}"
+    )
+    variables = {
+        "c": ctx_id,
+        "a": {"key": key, "value": value, "weight": float(weight)},
+    }
+    data = _post_graphql(gql, variables, timeout=timeout)
+    if data is None:
+        return None
+    return data.get("decorateContext") or None
+
+
+def get_context(ctx_id: str, *,
+                 timeout: float = _DEFAULT_TIMEOUT) -> Optional[dict]:
+    """Wrap `context(id)`. Returns the Context dict or None."""
+    if not ctx_id:
+        _record_error("ctx_id is required")
+        return None
+    gql = (
+        "query($i:String!){"
+        " context(id:$i){"
+        "   id ts tags annotations{ key value weight }"
+        " }"
+        "}"
+    )
+    data = _post_graphql(gql, {"i": ctx_id}, timeout=timeout)
+    if data is None:
+        return None
+    return data.get("context") or None
+
+
+def render_context(ctx_id: str, *,
+                    timeout: float = _DEFAULT_TIMEOUT
+                    ) -> Optional[str]:
+    """Wrap `renderContext(ctxId) -> String`. Returns the rendered
+    text. Returns None on failure, "" if devagentic returns null."""
+    if not ctx_id:
+        _record_error("ctx_id is required")
+        return None
+    gql = "query($c:String!){ renderContext(ctxId:$c) }"
+    data = _post_graphql(gql, {"c": ctx_id}, timeout=timeout)
+    if data is None:
+        return None
+    val = data.get("renderContext")
+    if val is None:
+        return ""
+    return str(val)
