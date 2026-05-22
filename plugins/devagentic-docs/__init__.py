@@ -11,6 +11,7 @@ registered. Hermes' other flows are unchanged.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from . import commands as _commands, preamble as _preamble
 
@@ -18,10 +19,13 @@ from . import commands as _commands, preamble as _preamble
 logger = logging.getLogger(__name__)
 
 
+_PLUGIN_DIR = Path(__file__).resolve().parent
+
+
 def register(ctx) -> None:
     """Plugin loader entrypoint. Wires the /doc + /fork slash
-    commands and the pre_llm_call preamble into the host's
-    PluginContext."""
+    commands, the pre_llm_call preamble, and the `docs` skill
+    into the host's PluginContext."""
     ctx.register_command(
         name="doc",
         handler=_commands.doc_command,
@@ -42,3 +46,24 @@ def register(ctx) -> None:
     )
     # pre_llm_call preamble — inert unless a fork is active.
     ctx.register_hook("pre_llm_call", _preamble.on_pre_llm_call)
+
+    # Plugin-scoped reference skill — resolvable via skill_view()
+    # as `devagentic-docs:docs`. Opt-in load; not in the
+    # system-prompt <available_skills> index by default.
+    skill_path = _PLUGIN_DIR / "skills" / "docs" / "SKILL.md"
+    if skill_path.is_file():
+        try:
+            ctx.register_skill(
+                name="docs",
+                path=skill_path,
+                description=("Doc-graph authoring + fork-injection "
+                             "conventions for the devagentic-docs "
+                             "plugin."),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "devagentic-docs: failed to register skill: %s", exc)
+    else:
+        logger.debug(
+            "devagentic-docs: skill path %s missing; skipping",
+            skill_path)
