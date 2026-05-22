@@ -104,6 +104,31 @@ def test_manifest_parses_and_declares_expected_fields():
 
 # ─── Client ─────────────────────────────────────────────────
 
+def test_base_url_appends_v1_when_missing(plugin_pkg, monkeypatch):
+    """Operators may set DEVAGENTIC_BASE_URL=$DUPLEX_SERVICE_URL
+    (host[:port] only). Plugin must auto-append /v1 so it doesn't
+    silently 404 against the real surface (see #13)."""
+    monkeypatch.setenv("DEVAGENTIC_BASE_URL", "http://devbox:6070")
+    assert plugin_pkg.client._base_url() == "http://devbox:6070/v1"
+
+
+def test_base_url_respects_explicit_v1(plugin_pkg, monkeypatch):
+    monkeypatch.setenv("DEVAGENTIC_BASE_URL", "http://devbox:6070/v1")
+    assert plugin_pkg.client._base_url() == "http://devbox:6070/v1"
+
+
+def test_base_url_respects_explicit_version(plugin_pkg, monkeypatch):
+    """An explicit /vN must not be rewritten to /v1."""
+    monkeypatch.setenv("DEVAGENTIC_BASE_URL", "http://devbox:6070/v2")
+    assert plugin_pkg.client._base_url() == "http://devbox:6070/v2"
+
+
+def test_base_url_strips_trailing_slash_before_append(
+        plugin_pkg, monkeypatch):
+    monkeypatch.setenv("DEVAGENTIC_BASE_URL", "http://devbox:6070/")
+    assert plugin_pkg.client._base_url() == "http://devbox:6070/v1"
+
+
 def test_client_list_canvases_returns_parsed_list(
         plugin_pkg, monkeypatch):
     monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Optional
@@ -30,11 +31,17 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_TIMEOUT = 8.0
+_VERSION_SUFFIX_RE = re.compile(r"/v\d+$")
 
 
 def _base_url() -> str:
     raw = os.environ.get("DEVAGENTIC_BASE_URL", "http://127.0.0.1:6071/v1")
-    return raw.rstrip("/")
+    trimmed = raw.rstrip("/")
+    # Append /v1 when the operator set only host[:port] — silent 404s
+    # otherwise (see #13). Respects an explicit /vN suffix.
+    if not _VERSION_SUFFIX_RE.search(trimmed):
+        trimmed = trimmed + "/v1"
+    return trimmed
 
 
 def _api_key() -> str:
