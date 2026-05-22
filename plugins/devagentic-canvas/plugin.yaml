@@ -1,0 +1,7 @@
+name: devagentic-canvas
+version: 0.1.0
+description: "Canvas authoring + state-aware preamble injection over devagentic's /v1/canvas surface. Provides /canvas slash commands (list / open / close / show) and a pre_llm_call hook that surfaces the active canvas's nodes + edges as ephemeral context for every turn while a canvas is 'open' in the session. Disable with `hermes plugin disable devagentic-canvas`; enabled state is fully inert otherwise."
+author: TechDevGroup
+kind: standalone
+hooks:
+  - pre_llm_call
