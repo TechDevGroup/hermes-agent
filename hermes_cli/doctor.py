@@ -360,6 +360,103 @@ def _check_devagentic_graph() -> None:
     )
 
 
+def _check_cron_scheduler() -> None:
+    """Probe cron scheduler health when the operator has wired
+    cron jobs. Inert when ~/.hermes/cron/jobs.json doesn't exist
+    (the byte-stable default).
+
+    Surfaces two signals operators expect from `hermes doctor`
+    but currently have to discover via `hermes cron status`:
+
+    1. Gateway PID — cron jobs only fire when the gateway runs.
+    2. Recent failures — `last_status` per job indicates whether
+       runs are succeeding or hitting auth / timeout / config
+       errors.
+
+    See #26.
+    """
+    try:
+        from cron.jobs import load_jobs as _load_jobs, JOBS_FILE
+        from hermes_cli.gateway import find_gateway_pids
+    except Exception as exc:  # noqa: BLE001
+        # Cron module missing would be a hermes packaging defect,
+        # not an operator-fixable problem.
+        check_warn("Cron scheduler module not importable", str(exc))
+        return
+
+    try:
+        if not JOBS_FILE.exists():
+            return  # Cron unused — no section to show.
+    except Exception:
+        return
+
+    try:
+        jobs = _load_jobs() or []
+    except Exception as exc:  # noqa: BLE001
+        # load_jobs raises RuntimeError on corruption — surface it
+        # rather than letting doctor itself crash mid-section.
+        _section("Cron Scheduler")
+        check_fail("Could not read jobs.json", str(exc))
+        return
+
+    if not jobs:
+        return  # File exists but empty — no actionable signal.
+
+    _section("Cron Scheduler")
+
+    # 1. Gateway running? Cron only fires when the gateway is up.
+    try:
+        pids = find_gateway_pids()
+    except Exception as exc:  # noqa: BLE001
+        check_warn("Gateway PID lookup failed", str(exc))
+        pids = []
+    if pids:
+        check_ok(
+            "Gateway running",
+            f"PID {', '.join(str(p) for p in pids)}"
+            " (cron jobs will fire on schedule)",
+        )
+    else:
+        check_fail(
+            "Gateway not running",
+            "cron jobs will NOT fire — run `hermes gateway` or "
+            "`hermes gateway install` for systemd. See "
+            "`hermes cron status` for the same check.",
+        )
+
+    # 2. Active job count + next-run summary.
+    active_jobs = [j for j in jobs
+                   if not j.get("disabled")
+                   and j.get("paused") is not True]
+    next_runs = sorted(j.get("next_run_at") for j in active_jobs
+                       if j.get("next_run_at"))
+    if active_jobs:
+        detail = ""
+        if next_runs:
+            detail = f"next run: {next_runs[0]}"
+        check_ok(f"{len(active_jobs)} active job(s)", detail)
+    else:
+        check_info("0 active jobs (all paused/disabled/completed)")
+
+    # 3. Recent failures — every job tracks last_status.
+    failed = [j for j in jobs
+              if (j.get("last_status") or "").lower()
+              not in ("", "ok", "skipped", "pending")]
+    if failed:
+        check_warn(
+            f"{len(failed)} of {len(jobs)} job(s) have a failing "
+            "last_status",
+            "see jobs.json or `hermes cron status` for full detail",
+        )
+        for j in failed[:5]:
+            ident = j.get("name") or j.get("id") or "(unnamed)"
+            when = j.get("last_run_at") or "?"
+            err = j.get("last_error") or j.get("last_status") or "?"
+            check_info(f"  - {ident} ({when}): {err[:120]}")
+    # No `check_ok("0 failures")` line — doctor convention is to
+    # stay quiet when nothing is wrong.
+
+
 _APIKEY_PROVIDERS_CACHE: list | None = None
 
 
@@ -2036,6 +2133,7 @@ def run_doctor(args):
             check_warn(f"{_active_memory_provider} check failed", str(_e))
 
     _check_devagentic_graph()
+    _check_cron_scheduler()
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
