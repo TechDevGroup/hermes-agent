@@ -318,8 +318,13 @@ def _check_devagentic_graph() -> None:
         elif exc.code == 404:
             check_fail(
                 "Devagentic GraphQL: not found",
-                f"{base}/graphql returned 404 — verify "
-                "DEVAGENTIC_BASE_URL points at a graph-enabled instance",
+                f"{base}/graphql returned 404. Some devagentic "
+                "deployments expose REST (e.g. /v1/canvases) but "
+                "not /graphql over HTTP. See "
+                "TechDevGroup/hermes-agent#21 for the known gap; "
+                "verify with `curl -X POST <url>/graphql -d "
+                "'{\"query\":\"{__typename}\"}'` before assuming "
+                "DEVAGENTIC_BASE_URL is wrong.",
             )
         else:
             check_fail(
