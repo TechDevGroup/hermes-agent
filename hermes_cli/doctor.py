@@ -621,6 +621,44 @@ def _check_gateway_runtime() -> None:
             check_warn(text, detail)
 
 
+def _check_acp_installation(issues: list[str]) -> None:
+    """Probe the optional ACP adapter (IDE integration via the
+    Agent-Client Protocol). Silent when both imports succeed — most
+    operators don't use ACP and don't need an extra row each run.
+    Surfaces a _fail_and_issue when the runtime would actually
+    break, so operators who DO use ACP (Zed / Cursor / JetBrains
+    via the ACP Registry) get a clear pip-install hint.
+
+    `hermes acp --check` does the same probe explicitly, but most
+    operators only learn ACP exists by running `hermes doctor`
+    when their IDE integration breaks.
+    """
+    try:
+        import acp  # noqa: F401
+        from acp_adapter.server import HermesACPAgent  # noqa: F401
+    except ImportError as exc:
+        _section("ACP (IDE integration)")
+        _fail_and_issue(
+            "agent-client-protocol not importable",
+            f"{exc} — run `pip install agent-client-protocol` "
+            "to enable `hermes acp` (Zed, Cursor, JetBrains ACP "
+            "Registry integration)",
+            "Install agent-client-protocol if you use a Zed / "
+            "Cursor / JetBrains ACP-aware IDE: pip install "
+            "agent-client-protocol",
+            issues,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Some other error during import — surface as warn, not fail.
+        # `hermes acp` would still error out, but the fix is less
+        # clear-cut (could be a downstream import failure).
+        _section("ACP (IDE integration)")
+        check_warn(
+            "ACP import failed for non-ImportError reason",
+            f"{type(exc).__name__}: {exc}",
+        )
+
+
 _APIKEY_PROVIDERS_CACHE: list | None = None
 
 
@@ -2339,6 +2377,7 @@ def run_doctor(args):
     _check_devagentic_graph()
     _check_cron_scheduler()
     _check_gateway_runtime()
+    _check_acp_installation(issues)
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
