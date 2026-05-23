@@ -2310,18 +2310,35 @@ def run_doctor(args):
         except Exception as _e:
             check_warn("Mem0 check failed", str(_e))
     else:
-        # Generic check for other memory providers (openviking, hindsight, etc.)
+        # Generic check for other memory providers (openviking,
+        # supermemory, hindsight, byterover, retaindb, holographic).
+        # Each provider's `is_available()` only checks env-vars / CLI
+        # presence — it does NOT probe backend reachability (#36).
+        # Until a `health_check()` ABC method lands, the most we can
+        # truthfully say is "config detected" — not "active".
         try:
             from plugins.memory import load_memory_provider
             _provider = load_memory_provider(_active_memory_provider)
             if _provider and _provider.is_available():
-                check_ok(f"{_active_memory_provider} provider active")
+                check_ok(
+                    f"{_active_memory_provider} provider configured")
+                check_info(
+                    "is_available() reports True (env vars / CLI "
+                    "present) — backend reachability not probed by "
+                    "doctor. Honcho + Mem0 do real probes; other "
+                    "providers wait on a `health_check()` ABC method. "
+                    "See TechDevGroup/hermes-agent#36.")
             elif _provider:
-                check_warn(f"{_active_memory_provider} configured but not available", "run: hermes memory status")
+                check_warn(
+                    f"{_active_memory_provider} configured but not available",
+                    "run: hermes memory status")
             else:
-                check_warn(f"{_active_memory_provider} plugin not found", "run: hermes memory setup")
+                check_warn(
+                    f"{_active_memory_provider} plugin not found",
+                    "run: hermes memory setup")
         except Exception as _e:
-            check_warn(f"{_active_memory_provider} check failed", str(_e))
+            check_warn(
+                f"{_active_memory_provider} check failed", str(_e))
 
     _check_devagentic_graph()
     _check_cron_scheduler()

@@ -386,6 +386,32 @@ class TestDoctorMemoryProviderSection:
         assert "Memory Provider" in out
         assert "Built-in memory active" not in out
 
+    def test_generic_provider_wording_no_longer_implies_reachability(
+            self, monkeypatch, tmp_path):
+        """#36: generic providers (e.g. openviking) only check env-var
+        presence in is_available(). Doctor must not say "active"
+        (implies reachable); must say "configured" + flag the gap."""
+        # Stub load_memory_provider to return a SimpleNamespace whose
+        # is_available() returns True without any network call —
+        # mirrors the production openviking/supermemory/etc. shape.
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(
+            is_available=lambda: True,
+            name=lambda: "openviking",
+        )
+        import plugins.memory as _mem_pkg
+        monkeypatch.setattr(_mem_pkg, "load_memory_provider",
+                            lambda name: fake)
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path,
+                                            provider="openviking")
+        assert "openviking provider configured" in out
+        assert "openviking provider active" not in out
+        # The info row must point at the open issue so operators can
+        # follow the design discussion if they care.
+        assert "#36" in out
+        assert "backend reachability not probed" in out
+
 
 def test_run_doctor_termux_treats_docker_and_browser_warnings_as_expected(monkeypatch, tmp_path):
     helper = TestDoctorMemoryProviderSection()
