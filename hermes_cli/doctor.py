@@ -308,14 +308,24 @@ def _check_devagentic_graph() -> None:
     try:
         with _urllib_request.urlopen(req, timeout=4.0) as resp:
             raw = resp.read().decode("utf-8")
-    except _urllib_error.HTTPError as exc:
-        if exc.code in (401, 403):
+    except (_urllib_error.URLError, OSError, TimeoutError) as exc:
+        # HTTPError is a URLError subclass; classify_http_error (#38)
+        # gives us the one-line auth / 404 / generic / unreachable
+        # dispatch.
+        from utils import (
+            classify_http_error,
+            HTTP_ERROR_AUTH,
+            HTTP_ERROR_NOT_FOUND,
+            HTTP_ERROR_HTTP,
+        )
+        kind = classify_http_error(exc)
+        if kind == HTTP_ERROR_AUTH:
             check_fail(
                 "Devagentic GraphQL: auth failed",
                 "set DEVAGENTIC_API_KEY (any non-empty value when "
                 "devagentic runs in DEVAGENTIC_TRUST_HEADER=1 mode)",
             )
-        elif exc.code == 404:
+        elif kind == HTTP_ERROR_NOT_FOUND:
             check_fail(
                 "Devagentic GraphQL: not found",
                 f"{base}/graphql returned 404. Some devagentic "
@@ -326,17 +336,16 @@ def _check_devagentic_graph() -> None:
                 "'{\"query\":\"{__typename}\"}'` before assuming "
                 "DEVAGENTIC_BASE_URL is wrong.",
             )
-        else:
+        elif kind == HTTP_ERROR_HTTP:
             check_fail(
-                f"Devagentic GraphQL: HTTP {exc.code}",
+                f"Devagentic GraphQL: HTTP {getattr(exc, 'code', '?')}",
                 f"unexpected status from {base}/graphql",
             )
-        return
-    except (_urllib_error.URLError, OSError, TimeoutError) as exc:
-        check_fail(
-            "Devagentic GraphQL: unreachable",
-            f"{base}/graphql — {exc}",
-        )
+        else:
+            check_fail(
+                "Devagentic GraphQL: unreachable",
+                f"{base}/graphql — {exc}",
+            )
         return
 
     try:
