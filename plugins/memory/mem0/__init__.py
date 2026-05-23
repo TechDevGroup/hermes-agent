@@ -143,6 +143,53 @@ class Mem0MemoryProvider(MemoryProvider):
         cfg = _load_config()
         return bool(cfg.get("api_key"))
 
+    def health_check(self) -> tuple[bool, str]:
+        """Probe Mem0 by making a minimal ``get_all(user_id, limit=1)``
+        round-trip with the configured key.
+
+        Returns:
+          (True, "")                       — key + reachability OK.
+          (False, "auth: ...")             — 401/403/forbidden/unauthorized/
+                                              invalid-api-key/authentication.
+          (False, "unreachable: ...")      — network / connection / timeout.
+          (False, "no_api_key")            — MEM0_API_KEY not set.
+          (False, "sdk_missing")           — mem0ai not installed.
+          (False, "<other>: <msg>")        — anything else (transient).
+
+        See RFC #42 for the reason-prefix convention. Doctor uses
+        the prefix to choose between check_fail (auth, not_found)
+        and check_warn (unreachable, freeform). MUST NOT raise.
+        """
+        try:
+            cfg = _load_config()
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"config_error: {exc}")
+        api_key = cfg.get("api_key", "")
+        if not api_key:
+            return (False, "no_api_key")
+        user_id = cfg.get("user_id", "hermes-user")
+        try:
+            from mem0 import MemoryClient
+        except ImportError:
+            return (False, "sdk_missing")
+        try:
+            client = MemoryClient(api_key=api_key)
+            client.get_all(user_id=user_id, limit=1)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            msg_lc = msg.lower()
+            is_auth = (
+                "401" in msg
+                or "403" in msg
+                or "unauthorized" in msg_lc
+                or "forbidden" in msg_lc
+                or "invalid api key" in msg_lc
+                or "authentication" in msg_lc
+            )
+            prefix = "auth" if is_auth else "unreachable"
+            return (False, f"{prefix}: {msg[:200]}")
+        return (True, "")
+
     def save_config(self, values, hermes_home):
         """Write config to $HERMES_HOME/mem0.json."""
         import json
