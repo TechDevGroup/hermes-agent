@@ -611,6 +611,88 @@ class HindsightMemoryProvider(MemoryProvider):
         except Exception:
             return False
 
+    def health_check(self) -> tuple[bool, str]:
+        """Mode-dependent probe.
+
+        local / local_embedded:
+          (True, "") if the local Hindsight stack imports cleanly.
+          (False, "sdk_missing: <exc>") otherwise.
+
+        local_external / cloud:
+          GET <api_url>/version with the configured key.
+          (True, "")                  — 200 + parseable JSON.
+          (False, "no_credentials")   — neither apiKey nor api_url
+                                         is set (cloud only — for
+                                         local_external the api_url
+                                         is required and absence is
+                                         classified as no_url).
+          (False, "no_url")           — local_external without an
+                                         api_url.
+          (False, "auth: ...")        — 401 / 403.
+          (False, "not_found: ...")   — 404.
+          (False, "http: ...")        — other non-2xx.
+          (False, "unreachable: ...") — connection / timeout / parse.
+
+        Top-level config load failure → (False, "config_error: <exc>").
+        MUST NOT raise.
+        """
+        try:
+            cfg = _load_config()
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"config_error: {exc}")
+        mode = cfg.get("mode", "cloud")
+
+        # ── local modes: import probe only ──────────────────
+        if mode in {"local", "local_embedded"}:
+            ok, exc_msg = _check_local_runtime()
+            if ok:
+                return (True, "")
+            return (False, f"sdk_missing: {(exc_msg or 'import failed')[:200]}")
+
+        # ── url-based modes (cloud / local_external) ────────
+        api_url = (cfg.get("api_url")
+                   or os.environ.get("HINDSIGHT_API_URL", "")).strip()
+        api_key = (cfg.get("apiKey")
+                   or cfg.get("api_key")
+                   or os.environ.get("HINDSIGHT_API_KEY", "")).strip()
+
+        if mode == "local_external":
+            if not api_url:
+                return (False, "no_url")
+        else:
+            # cloud
+            if not (api_url or api_key):
+                return (False, "no_credentials")
+            if not api_url:
+                # api_key set but no URL — most cloud deployments
+                # need both. Treat as a config error pointing at
+                # the missing URL.
+                return (False, "no_url")
+
+        import urllib.error
+        import urllib.request
+        url = api_url.rstrip("/") + "/version"
+        req = urllib.request.Request(url)
+        if api_key:
+            req.add_header("Authorization", f"Bearer {api_key}")
+        try:
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                payload = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(payload)
+            if not isinstance(data, dict):
+                return (False, f"unreachable: /version returned non-dict")
+            return (True, "")
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                return (False, f"auth: HTTP {exc.code} from {url}")
+            if exc.code == 404:
+                return (False, f"not_found: HTTP 404 from {url}")
+            return (False, f"http: HTTP {exc.code} from {url}")
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            return (False, f"unreachable: {str(exc)[:200]}")
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"unreachable: {str(exc)[:200]}")
+
     def save_config(self, values, hermes_home):
         """Write config to $HERMES_HOME/hindsight/config.json."""
         import json
