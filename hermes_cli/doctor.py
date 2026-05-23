@@ -134,6 +134,22 @@ def _doctor_tool_availability_detail(toolset: str) -> str:
     return ""
 
 
+def _doctor_tool_unavailable_detail(toolset: str) -> str:
+    """Per-toolset hint shown when a toolset is unavailable and has no
+    explicit `requires_env` to surface. Avoids the generic
+    `(system dependency not met)` line for multi-provider toolsets
+    where the operator just needs to know which env var to set (#40).
+    """
+    if toolset == "image_gen":
+        return ("no image-gen provider configured — set "
+                "OPENAI_API_KEY, XAI_API_KEY, or use OpenAI Codex "
+                "OAuth (see `hermes tools`)")
+    if toolset == "video_gen":
+        return ("no video-gen provider configured — set FAL_KEY, "
+                "XAI_API_KEY, or use xAI OAuth (see `hermes tools`)")
+    return ""
+
+
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
     """Adjust runtime-gated tool availability for doctor diagnostics."""
     updated_available = list(available)
@@ -2147,7 +2163,15 @@ def run_doctor(args):
                 vars_str = ", ".join(env_vars)
                 check_warn(item["name"], f"(missing {vars_str})")
             else:
-                check_warn(item["name"], "(system dependency not met)")
+                # Multi-provider toolsets (image_gen, video_gen) have
+                # requires_env=[] because any-of-N providers will do
+                # — fall back to a per-toolset hint instead of the
+                # opaque "(system dependency not met)" string (#40).
+                detail = _doctor_tool_unavailable_detail(
+                    item.get("name") or "")
+                check_warn(item["name"],
+                           f"({detail})" if detail
+                           else "(system dependency not met)")
 
         # Count disabled tools with API key requirements
         api_disabled = [u for u in unavailable if (u.get("missing_vars") or u.get("env_vars"))]
