@@ -185,6 +185,49 @@ class ByteRoverMemoryProvider(MemoryProvider):
         """Check if brv CLI is installed. No network calls."""
         return _resolve_brv_path() is not None
 
+    def health_check(self) -> tuple[bool, str]:
+        """Probe ByteRover by running ``brv status`` — verifies the CLI
+        is BOTH installed AND logged in. ``is_available()`` only
+        confirmed the binary was on PATH; an unauthenticated user
+        would still see the green check from doctor.
+
+        Returns (RFC #42 conventions):
+          (True, "")                     — `brv status` exits 0.
+          (False, "sdk_missing")         — brv CLI not on PATH.
+          (False, "auth: ...")           — non-zero exit + stderr
+                                            mentions auth / login.
+          (False, "unreachable: timeout")— probe timed out.
+          (False, "unreachable: ...")    — anything else (config
+                                            issue, malformed install).
+
+        MUST NOT raise — _run_brv already catches subprocess errors
+        and returns a dict; we just translate.
+        """
+        if _resolve_brv_path() is None:
+            return (False, "sdk_missing")
+        try:
+            result = _run_brv(["status"], timeout=3)
+        except Exception as exc:  # noqa: BLE001
+            # Defense in depth — _run_brv is already wrapped, but
+            # health_check must never propagate.
+            return (False, f"unreachable: {exc}")
+        if result.get("success"):
+            return (True, "")
+        err = (result.get("error") or "").strip()
+        err_lc = err.lower()
+        if "timeout" in err_lc or "timed out" in err_lc:
+            return (False, "unreachable: timeout")
+        is_auth = (
+            "auth" in err_lc
+            or "login" in err_lc
+            or "unauthorized" in err_lc
+            or "not signed in" in err_lc
+            or "401" in err
+            or "403" in err
+        )
+        prefix = "auth" if is_auth else "unreachable"
+        return (False, f"{prefix}: {err[:200]}")
+
     def get_config_schema(self):
         return [
             {
