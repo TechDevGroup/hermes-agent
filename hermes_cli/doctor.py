@@ -607,6 +607,12 @@ def _build_apikey_providers_list() -> list:
     already present — adding plugins/model-providers/<name>/ is sufficient to get into doctor.
     """
     _static = [
+        # Groq + Mistral were added to `hermes status` API Keys in
+        # #10/#11 but were missing from the connectivity probes (#32).
+        # Both expose a Bearer-auth /v1/models endpoint the generic
+        # _probe_apikey_provider handles unchanged.
+        ("Groq",             ("GROQ_API_KEY",),                              "https://api.groq.com/openai/v1/models", "GROQ_BASE_URL", True),
+        ("Mistral",          ("MISTRAL_API_KEY",),                           "https://api.mistral.ai/v1/models",      "MISTRAL_BASE_URL", True),
         ("Z.AI / GLM",      ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "https://api.z.ai/api/paas/v4/models", "GLM_BASE_URL", True),
         ("Kimi / Moonshot",  ("KIMI_API_KEY",),                              "https://api.moonshot.ai/v1/models",   "KIMI_BASE_URL", True),
         ("StepFun Step Plan", ("STEPFUN_API_KEY",),                          "https://api.stepfun.ai/step_plan/v1/models", "STEPFUN_BASE_URL", True),
