@@ -2244,16 +2244,62 @@ def run_doctor(args):
             from plugins.memory.mem0 import _load_config as _load_mem0_config
             mem0_cfg = _load_mem0_config()
             mem0_key = mem0_cfg.get("api_key", "")
-            if mem0_key:
-                check_ok("Mem0 API key configured")
-                check_info(f"user_id={mem0_cfg.get('user_id', '?')}  agent_id={mem0_cfg.get('agent_id', '?')}")
-            else:
+            mem0_user = mem0_cfg.get("user_id", "hermes-user")
+            mem0_agent = mem0_cfg.get("agent_id", "hermes")
+            if not mem0_key:
                 _fail_and_issue(
                     "Mem0 API key not set",
                     "(set MEM0_API_KEY in .env or run hermes memory setup)",
                     "Mem0 is set as memory provider but API key is missing",
                     issues,
                 )
+            else:
+                # Probe with a minimal API call so a wrong / expired key
+                # surfaces here instead of failing at first-request time
+                # in production (see #34). Honcho already does this via
+                # get_honcho_client(); Mem0 didn't.
+                try:
+                    from mem0 import MemoryClient
+                    _mem0_client = MemoryClient(api_key=mem0_key)
+                    _mem0_client.get_all(user_id=mem0_user, limit=1)
+                except ImportError:
+                    _fail_and_issue(
+                        "mem0ai not installed",
+                        "pip install mem0ai",
+                        "Mem0 is set as memory provider but mem0ai SDK is not installed",
+                        issues,
+                    )
+                except Exception as _mp_exc:  # noqa: BLE001
+                    msg = str(_mp_exc)
+                    msg_lc = msg.lower()
+                    is_auth = (
+                        "401" in msg
+                        or "403" in msg
+                        or "unauthorized" in msg_lc
+                        or "forbidden" in msg_lc
+                        or "invalid api key" in msg_lc
+                        or "authentication" in msg_lc
+                    )
+                    if is_auth:
+                        _fail_and_issue(
+                            "Mem0 auth rejected",
+                            msg[:200],
+                            "Mem0 API key rejected — verify MEM0_API_KEY "
+                            "at https://app.mem0.ai",
+                            issues,
+                        )
+                    else:
+                        check_warn(
+                            "Mem0 probe failed",
+                            f"{msg[:200]} "
+                            "(network down, SDK changed, or transient — "
+                            "the key itself may still be valid)",
+                        )
+                else:
+                    check_ok(
+                        "Mem0 connected",
+                        f"user_id={mem0_user} agent_id={mem0_agent}",
+                    )
         except ImportError:
             _fail_and_issue(
                 "Mem0 plugin not loadable",
