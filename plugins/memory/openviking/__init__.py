@@ -412,6 +412,66 @@ class OpenVikingMemoryProvider(MemoryProvider):
         """Check if OpenViking endpoint is configured. No network calls."""
         return bool(os.environ.get("OPENVIKING_ENDPOINT"))
 
+    def health_check(self) -> tuple[bool, str]:
+        """Probe OpenViking by hitting ``<endpoint>/health`` with a
+        3-second timeout. Classifies the result with RFC #42 reason
+        prefixes:
+
+          (True, "")                  — 200 from /health.
+          (False, "no_endpoint")      — OPENVIKING_ENDPOINT unset
+                                         (default falls through here
+                                         only if explicitly cleared).
+          (False, "sdk_missing")      — httpx not installed.
+          (False, "auth: ...")        — 401 / 403.
+          (False, "not_found: ...")   — 404 (endpoint exists but
+                                         /health route missing).
+          (False, "http: ...")        — any other non-2xx.
+          (False, "unreachable: ...") — DNS / connection / timeout.
+
+        MUST NOT raise.
+        """
+        endpoint = os.environ.get("OPENVIKING_ENDPOINT", "").strip()
+        if not endpoint:
+            return (False, "no_endpoint")
+        endpoint = endpoint.rstrip("/")
+        httpx = _get_httpx()
+        if httpx is None:
+            return (False, "sdk_missing")
+        # Build minimal headers — full _headers logic is in the
+        # _OpenVikingClient class but we don't want to instantiate
+        # it here (it raises ImportError when httpx is missing
+        # rather than returning a sentinel).
+        api_key = (os.environ.get("OPENVIKING_API_KEY") or "").strip()
+        headers = {
+            "Content-Type": "application/json",
+            "X-OpenViking-Agent": os.environ.get(
+                "OPENVIKING_AGENT", "hermes"),
+        }
+        account = os.environ.get("OPENVIKING_ACCOUNT", "default")
+        user = os.environ.get("OPENVIKING_USER", "default")
+        if account:
+            headers["X-OpenViking-Account"] = account
+        if user:
+            headers["X-OpenViking-User"] = user
+        if api_key:
+            headers["X-API-Key"] = api_key
+            headers["Authorization"] = "Bearer " + api_key
+        try:
+            resp = httpx.get(
+                f"{endpoint}/health", headers=headers, timeout=3.0)
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"unreachable: {str(exc)[:200]}")
+        code = getattr(resp, "status_code", None)
+        if code == 200:
+            return (True, "")
+        if code in (401, 403):
+            return (False, f"auth: HTTP {code} from {endpoint}/health")
+        if code == 404:
+            return (False,
+                    f"not_found: HTTP 404 — endpoint reachable but "
+                    f"/health route missing at {endpoint}")
+        return (False, f"http: status {code} from {endpoint}/health")
+
     def get_config_schema(self):
         return [
             {
