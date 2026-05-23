@@ -13,7 +13,38 @@ import pytest
 import hermes_cli.doctor as doctor
 import hermes_cli.gateway as gateway_cli
 from hermes_cli import doctor as doctor_mod
-from hermes_cli.doctor import _has_provider_env_config
+from hermes_cli.doctor import _has_provider_env_config, _build_apikey_providers_list
+
+
+class TestApiKeyProvidersList:
+    """Verify the static connectivity-probe list (#32 + #11).
+
+    `_build_apikey_providers_list()` drives the threaded HTTP /models
+    reachability probes in the API Connectivity section. Static
+    entries must match the providers already surfaced in
+    `hermes status` API Keys so operators get consistent coverage.
+    """
+
+    def test_groq_present_with_models_endpoint(self):
+        names = {t[0]: t for t in _build_apikey_providers_list()}
+        assert "Groq" in names
+        _, env_vars, url, base_env, _supports = names["Groq"]
+        assert env_vars == ("GROQ_API_KEY",)
+        assert url and "groq.com" in url and url.endswith("/models")
+        assert base_env == "GROQ_BASE_URL"
+
+    def test_mistral_present_with_models_endpoint(self):
+        names = {t[0]: t for t in _build_apikey_providers_list()}
+        assert "Mistral" in names
+        _, env_vars, url, base_env, _supports = names["Mistral"]
+        assert env_vars == ("MISTRAL_API_KEY",)
+        assert url and "mistral.ai" in url and url.endswith("/models")
+        assert base_env == "MISTRAL_BASE_URL"
+
+    def test_no_duplicate_provider_names(self):
+        names = [t[0] for t in _build_apikey_providers_list()]
+        assert len(names) == len(set(names)), (
+            f"duplicate provider names: {names}")
 
 
 class TestDoctorPlatformHints:
