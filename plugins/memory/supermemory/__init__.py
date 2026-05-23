@@ -461,6 +461,48 @@ class SupermemoryMemoryProvider(MemoryProvider):
         except Exception:
             return False
 
+    def health_check(self) -> tuple[bool, str]:
+        """Probe Supermemory by instantiating the SDK client and
+        calling ``.profile(container_tag="hermes-doctor-probe")``.
+        The probe-tag won't have any data, but the call validates
+        auth + reachability without modifying state.
+
+        Returns (RFC #42 conventions):
+          (True, "")                     — profile() round-trip OK.
+          (False, "no_api_key")          — SUPERMEMORY_API_KEY unset.
+          (False, "sdk_missing")         — supermemory SDK not installed.
+          (False, "auth: ...")           — 401/403/forbidden/unauthorized/
+                                            invalid-api-key/authentication.
+          (False, "unreachable: ...")    — any other exception.
+
+        MUST NOT raise.
+        """
+        api_key = os.environ.get("SUPERMEMORY_API_KEY", "")
+        if not api_key:
+            return (False, "no_api_key")
+        try:
+            from supermemory import Supermemory
+        except ImportError:
+            return (False, "sdk_missing")
+        try:
+            client = Supermemory(
+                api_key=api_key, timeout=5.0, max_retries=0)
+            client.profile(container_tag="hermes-doctor-probe")
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            msg_lc = msg.lower()
+            is_auth = (
+                "401" in msg
+                or "403" in msg
+                or "unauthorized" in msg_lc
+                or "forbidden" in msg_lc
+                or "invalid api key" in msg_lc
+                or "authentication" in msg_lc
+            )
+            prefix = "auth" if is_auth else "unreachable"
+            return (False, f"{prefix}: {msg[:200]}")
+        return (True, "")
+
     def get_config_schema(self):
         # Only prompt for the API key during `hermes memory setup`.
         # All other options are documented for $HERMES_HOME/supermemory.json
