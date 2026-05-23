@@ -13,7 +13,39 @@ import pytest
 import hermes_cli.doctor as doctor
 import hermes_cli.gateway as gateway_cli
 from hermes_cli import doctor as doctor_mod
-from hermes_cli.doctor import _has_provider_env_config, _build_apikey_providers_list
+from hermes_cli.doctor import (
+    _has_provider_env_config,
+    _build_apikey_providers_list,
+    _doctor_tool_unavailable_detail,
+)
+
+
+class TestDoctorToolUnavailableDetail:
+    """#40: unavailable multi-provider toolsets should give operators
+    a useful hint instead of `(system dependency not met)`."""
+
+    def test_image_gen_mentions_provider_envs(self):
+        detail = _doctor_tool_unavailable_detail("image_gen")
+        assert detail
+        assert "OPENAI_API_KEY" in detail
+        assert "XAI_API_KEY" in detail
+        # OpenAI Codex OAuth is one of the alternatives that wouldn't
+        # set OPENAI_API_KEY — the hint must mention it so operators
+        # don't waste time on the API-key path when they're already
+        # using OAuth.
+        assert "Codex OAuth" in detail or "OAuth" in detail
+
+    def test_video_gen_mentions_provider_envs(self):
+        detail = _doctor_tool_unavailable_detail("video_gen")
+        assert detail
+        assert "FAL_KEY" in detail
+        assert "XAI_API_KEY" in detail
+
+    def test_unknown_toolset_returns_empty_string(self):
+        # Doctor falls back to the generic "(system dependency not met)"
+        # when the helper returns "".
+        assert _doctor_tool_unavailable_detail("unknown") == ""
+        assert _doctor_tool_unavailable_detail("") == ""
 
 
 class TestApiKeyProvidersList:
