@@ -874,6 +874,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
 
     _register_canvas_tools(mcp)
     _register_docs_tools(mcp)
+    _register_devagentic_mutation_tools(mcp)
 
     return mcp
 
@@ -1408,3 +1409,131 @@ def run_mcp_server(verbose: bool = False) -> None:
         asyncio.run(_run())
     except KeyboardInterrupt:
         bridge.stop()
+
+
+def _resolve_mutations_client():
+    """Load the devagentic-mutations plugin's HTTP client module.
+    Same file-path import pattern as ``_resolve_canvas_client`` /
+    ``_resolve_docs_client`` — the hyphenated
+    ``plugins/devagentic-mutations/`` directory can't be addressed
+    via ``import plugins.devagentic_mutations``.
+
+    Returns ``None`` when the plugin isn't present; tools then
+    surface ``{"error": "mutations plugin not available …"}``
+    without crashing the MCP server.
+    """
+    try:
+        import importlib.util
+        from pathlib import Path
+        plugin_dir = (Path(__file__).resolve().parent
+                      / "plugins" / "devagentic-mutations")
+        client_path = plugin_dir / "client.py"
+        if not client_path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(
+            "_devagentic_mutations_client", client_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("mutations MCP: plugin client unavailable: %s", exc)
+        return None
+
+
+def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
+    """Register the devagentic-mutations MCP tools on ``mcp``.
+    Closes G2 (hermes-agent#56) of devagentic#203. Same shape as
+    ``_register_canvas_tools`` / ``_register_docs_tools``: each
+    tool is a thin adapter around the plugin client; failures
+    return ``{"error": "<msg>"}`` JSON strings without raising.
+
+    Tools registered:
+      * ``silo_query`` — wraps devagentic's ``querySilo`` GraphQL field
+      * ``confer_run`` — wraps devagentic's ``runConferLoop`` mutation
+
+    Not registered here (already in ``_register_docs_tools``):
+      ``doc_write`` (writeDoc), ``fork_*`` (forkContext family).
+
+    Follow-up tools tracked under #56:
+      ``assert_output``, ``patch_artifact``, ``read_artifact``,
+      ``fetch_url``.
+    """
+
+    def _err(msg: str) -> str:
+        return json.dumps({"error": msg})
+
+    def _reason(c) -> str:
+        """Pull the client's last_error_text if available; empty
+        string otherwise so callers can append ``f"{msg}{_reason(c)}"``
+        unconditionally."""
+        try:
+            t = c.last_error_text()
+        except Exception:  # noqa: BLE001
+            return ""
+        return f" ({t})" if t else ""
+
+    @mcp.tool()
+    def silo_query(name: str, prompt: str,
+                   role_override: Optional[str] = None) -> str:
+        """Query a named devagentic silo with a one-shot prompt.
+
+        Wraps devagentic's ``querySilo`` GraphQL field. Auto-scoped
+        to the active X-User-Id (env override or hermes profile).
+
+        Args:
+            name: Silo name (e.g. ``silo-gemini-flash``).
+            prompt: The user prompt to send to the silo.
+            role_override: Optional role override (e.g. ``aider``,
+                ``reviewer``); defaults to the silo's configured role.
+
+        Returns: JSON ``{"siloId": ..., "siloName": ..., "text": ...,
+        "cachedTokenCount": N, "promptTokenCount": N,
+        "totalTokenCount": N}`` on success, or ``{"error": ...}``.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available "
+                        "(missing plugins/devagentic-mutations/)")
+        if not name or not prompt:
+            return _err("name and prompt are required")
+        reply = c.query_silo(
+            name=name, prompt=prompt, role_override=role_override)
+        if reply is None:
+            return _err("silo_query failed" + _reason(c))
+        return json.dumps(reply, indent=2)
+
+    @mcp.tool()
+    def confer_run(user_id: str, candidate_id: str) -> str:
+        """Run a confer-loop on a finding-candidate.
+
+        Wraps devagentic's ``runConferLoop`` mutation. Polls 3-4
+        free-tier silos for a single-line ``{action, reason}``
+        verdict per silo, then rolls up by majority + confidence.
+        Writes one ``kind:confer-result`` doc + N
+        ``kind:silo-bench-response`` docs into the graph.
+
+        Args:
+            user_id: User scope (typically the active profile name).
+                The MCP layer passes the worker's X-User-Id binding;
+                you usually want to pass the same value here.
+            candidate_id: The ``kind:finding-candidate`` doc id to
+                confer on.
+
+        Returns: JSON rollup ``{confer_result_id, candidate_id,
+        consensus_action, confidence, recommendation,
+        silos_consulted, per_silo_response_ids,
+        disagreement_points}`` on success, or ``{"error": ...}``.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available")
+        if not user_id or not candidate_id:
+            return _err("user_id and candidate_id are required")
+        rollup = c.run_confer_loop(
+            user_id=user_id, candidate_id=candidate_id)
+        if rollup is None:
+            return _err("confer_run failed" + _reason(c))
+        return json.dumps(rollup, indent=2)
+

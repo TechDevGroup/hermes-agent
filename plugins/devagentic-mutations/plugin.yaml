@@ -1,0 +1,5 @@
+name: devagentic-mutations
+version: 0.1.0
+description: "Exposes devagentic graph mutations + queries (writeDoc + querySilo to start) as hermes MCP tools so worker sessions never shell out to devagentic internals. G2 of TechDevGroup/devagentic#203. Tools register via mcp_serve._register_devagentic_mutation_tools."
+author: TechDevGroup
+kind: standalone
