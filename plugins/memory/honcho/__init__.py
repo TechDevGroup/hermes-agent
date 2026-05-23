@@ -246,6 +246,84 @@ class HonchoMemoryProvider(MemoryProvider):
         except Exception:
             return False
 
+    def health_check(self) -> tuple[bool, str]:
+        """Probe Honcho by instantiating a real client (which makes
+        a handshake call against ``base_url`` with the configured key).
+
+        Returns (RFC #42 conventions):
+          (True, "")                    — handshake succeeds. Reason
+                                           string left empty; doctor
+                                           may append workspace/mode
+                                           details from its own
+                                           inspection of the config.
+          (False, "no_config")          — config file is absent.
+          (False, "disabled")           — enabled=false in config.
+          (False, "no_credentials")     — neither api_key nor base_url
+                                           is set.
+          (False, "sdk_missing")        — honcho-ai not installed.
+          (False, "auth: <msg>")        — handshake rejected auth.
+          (False, "unreachable: <msg>") — anything else (network,
+                                           timeout, SDK exception).
+
+        See RFC #42 for the reason-prefix taxonomy. MUST NOT raise —
+        the doctor section iterates providers and a raised exception
+        would crash the loop.
+        """
+        try:
+            from plugins.memory.honcho.client import (
+                HonchoClientConfig,
+                resolve_config_path,
+            )
+        except ImportError:
+            return (False, "sdk_missing")
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"config_error: {exc}")
+
+        try:
+            cfg_path = resolve_config_path()
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"config_error: {exc}")
+        if not cfg_path.exists():
+            return (False, "no_config")
+
+        try:
+            cfg = HonchoClientConfig.from_global_config()
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"config_error: {exc}")
+
+        if not cfg.enabled:
+            return (False, "disabled")
+        if not (cfg.api_key or cfg.base_url):
+            return (False, "no_credentials")
+
+        try:
+            from plugins.memory.honcho.client import (
+                get_honcho_client,
+                reset_honcho_client,
+            )
+        except ImportError:
+            return (False, "sdk_missing")
+
+        # Reset cached client so the probe makes a fresh handshake;
+        # otherwise a previously-broken client could be reused.
+        try:
+            reset_honcho_client()
+            get_honcho_client(cfg)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            msg_lc = msg.lower()
+            is_auth = (
+                "401" in msg
+                or "403" in msg
+                or "unauthorized" in msg_lc
+                or "forbidden" in msg_lc
+                or "invalid api key" in msg_lc
+                or "authentication" in msg_lc
+            )
+            prefix = "auth" if is_auth else "unreachable"
+            return (False, f"{prefix}: {msg[:200]}")
+        return (True, "")
+
     def save_config(self, values, hermes_home):
         """Write config to $HERMES_HOME/honcho.json (Honcho SDK native format)."""
         import json
