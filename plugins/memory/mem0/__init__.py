@@ -143,6 +143,29 @@ class Mem0MemoryProvider(MemoryProvider):
         cfg = _load_config()
         return bool(cfg.get("api_key"))
 
+
+    def health_check(self) -> tuple[bool, str]:
+        """Probe Mem0 API with a minimal search to verify key + connectivity."""
+        try:
+            from mem0 import MemoryClient
+            cfg = self._config if self._config else _load_config()
+            api_key = cfg.get("api_key", "")
+            if not api_key:
+                return (False, "auth: MEM0_API_KEY not configured")
+            client = MemoryClient(api_key=api_key)
+            user_id = cfg.get("user_id", "health-check-probe")
+            client.get_all(user_id=user_id, limit=1)
+            return (True, "")
+        except ImportError:
+            return (False, "unavailable: mem0ai not installed")
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "401" in msg or "403" in msg or "unauthorized" in msg or ("invalid" in msg and "api" in msg):
+                return (False, f"auth: {exc}")
+            if "connect" in msg or "timeout" in msg or "refused" in msg:
+                return (False, f"unreachable: {exc}")
+            return (False, f"unreachable: {exc}")
+
     def save_config(self, values, hermes_home):
         """Write config to $HERMES_HOME/mem0.json."""
         import json

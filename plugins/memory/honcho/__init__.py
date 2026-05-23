@@ -246,6 +246,29 @@ class HonchoMemoryProvider(MemoryProvider):
         except Exception:
             return False
 
+
+    def health_check(self) -> tuple[bool, str]:
+        """Probe Honcho backend via get_honcho_client (validates auth + connectivity)."""
+        try:
+            from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client, reset_honcho_client
+            hcfg = HonchoClientConfig.from_global_config()
+            if not hcfg.enabled:
+                return (False, "unavailable: Honcho disabled in config (set enabled: true)")
+            if not (hcfg.api_key or hcfg.base_url):
+                return (False, "auth: no API key or base URL configured")
+            reset_honcho_client()
+            get_honcho_client(hcfg)
+            return (True, "")
+        except ImportError:
+            return (False, "unavailable: honcho-ai not installed")
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "401" in msg or "403" in msg or "unauthorized" in msg or "forbidden" in msg or ("invalid" in msg and "key" in msg):
+                return (False, f"auth: {exc}")
+            if "connect" in msg or "timeout" in msg or "refused" in msg or "unreachable" in msg:
+                return (False, f"unreachable: {exc}")
+            return (False, f"unreachable: {exc}")
+
     def save_config(self, values, hermes_home):
         """Write config to $HERMES_HOME/honcho.json (Honcho SDK native format)."""
         import json

@@ -57,6 +57,31 @@ class MemoryProvider(ABC):
         Should not make network calls — just check config and installed deps.
         """
 
+
+    def health_check(self) -> tuple[bool, str]:
+        """Probe the backing service and return (healthy, reason).
+
+        Default delegates to is_available() -- providers that cannot probe
+        their backend get (False, "is_available() returned False") for failures.
+        Providers that CAN probe should override to make a lightweight network
+        call (GET /health, minimal API round-trip, etc.) within ~5 seconds.
+
+        Return (True, "") on success.
+        Return (False, "<prefix>: <detail>") on failure. Use prefixes:
+          "auth:"         -- bad key / expired token
+          "unreachable:"  -- connection refused / timeout / DNS failure
+          "not_found:"    -- endpoint 404
+          "rate_limited:" -- 429
+          "unavailable:"  -- is_available() returned False (default case)
+
+        Must never raise -- doctor invokes this in a loop.
+        """
+        try:
+            ok = self.is_available()
+            return (ok, "" if ok else "unavailable: is_available() returned False")
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"unavailable: is_available() raised: {exc}")
+
     @abstractmethod
     def initialize(self, session_id: str, **kwargs) -> None:
         """Initialize for a session.

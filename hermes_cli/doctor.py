@@ -1843,29 +1843,21 @@ def run_doctor(args):
             from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
             hcfg = HonchoClientConfig.from_global_config()
             _honcho_cfg_path = resolve_config_path()
-
             if not _honcho_cfg_path.exists():
                 check_warn("Honcho config not found", "run: hermes memory setup")
             elif not hcfg.enabled:
                 check_info(f"Honcho disabled (set enabled: true in {_honcho_cfg_path} to activate)")
-            elif not (hcfg.api_key or hcfg.base_url):
-                _fail_and_issue(
-                    "Honcho API key or base URL not set",
-                    "run: hermes memory setup",
-                    "No Honcho API key — run 'hermes memory setup'",
-                    issues,
-                )
             else:
-                from plugins.memory.honcho.client import get_honcho_client, reset_honcho_client
-                reset_honcho_client()
-                try:
-                    get_honcho_client(hcfg)
-                    check_ok(
-                        "Honcho connected",
-                        f"workspace={hcfg.workspace_id} mode={hcfg.recall_mode} freq={hcfg.write_frequency}",
-                    )
-                except Exception as _e:
-                    _fail_and_issue("Honcho connection failed", str(_e), f"Honcho unreachable: {_e}", issues)
+                from plugins.memory.honcho import HonchoMemoryProvider
+                _provider = HonchoMemoryProvider()
+                _healthy, _reason = _provider.health_check()
+                if _healthy:
+                    check_ok("Honcho connected",
+                             f"workspace={hcfg.workspace_id} mode={hcfg.recall_mode} freq={hcfg.write_frequency}")
+                elif _reason.startswith("auth:"):
+                    _fail_and_issue("Honcho auth rejected", _reason, f"Honcho auth error: {_reason}", issues)
+                else:
+                    _fail_and_issue("Honcho connection failed", _reason, f"Honcho unreachable: {_reason}", issues)
         except ImportError:
             _fail_and_issue(
                 "honcho-ai not installed",
@@ -1875,41 +1867,23 @@ def run_doctor(args):
             )
         except Exception as _e:
             check_warn("Honcho check failed", str(_e))
-    elif _active_memory_provider == "mem0":
-        try:
-            from plugins.memory.mem0 import _load_config as _load_mem0_config
-            mem0_cfg = _load_mem0_config()
-            mem0_key = mem0_cfg.get("api_key", "")
-            if mem0_key:
-                check_ok("Mem0 API key configured")
-                check_info(f"user_id={mem0_cfg.get('user_id', '?')}  agent_id={mem0_cfg.get('agent_id', '?')}")
-            else:
-                _fail_and_issue(
-                    "Mem0 API key not set",
-                    "(set MEM0_API_KEY in .env or run hermes memory setup)",
-                    "Mem0 is set as memory provider but API key is missing",
-                    issues,
-                )
-        except ImportError:
-            _fail_and_issue(
-                "Mem0 plugin not loadable",
-                "pip install mem0ai",
-                "Mem0 is set as memory provider but mem0ai is not installed",
-                issues,
-            )
-        except Exception as _e:
-            check_warn("Mem0 check failed", str(_e))
     else:
-        # Generic check for other memory providers (openviking, hindsight, etc.)
         try:
             from plugins.memory import load_memory_provider
             _provider = load_memory_provider(_active_memory_provider)
-            if _provider and _provider.is_available():
-                check_ok(f"{_active_memory_provider} provider active")
-            elif _provider:
-                check_warn(f"{_active_memory_provider} configured but not available", "run: hermes memory status")
-            else:
+            if not _provider:
                 check_warn(f"{_active_memory_provider} plugin not found", "run: hermes memory setup")
+            else:
+                _healthy, _reason = _provider.health_check()
+                if _healthy:
+                    check_ok(f"{_active_memory_provider} reachable")
+                elif _reason.startswith("auth:"):
+                    _fail_and_issue(f"{_active_memory_provider} auth rejected", _reason,
+                                    f"{_active_memory_provider} auth error: {_reason}", issues)
+                elif _reason.startswith("unreachable:"):
+                    check_warn(f"{_active_memory_provider} unreachable", _reason)
+                else:
+                    check_warn(f"{_active_memory_provider} health check failed", _reason)
         except Exception as _e:
             check_warn(f"{_active_memory_provider} check failed", str(_e))
 
