@@ -41,6 +41,19 @@ class TestDoctorToolUnavailableDetail:
         assert "FAL_KEY" in detail
         assert "XAI_API_KEY" in detail
 
+    def test_web_mentions_provider_envs(self):
+        detail = _doctor_tool_unavailable_detail("web")
+        assert detail
+        assert "TAVILY_API_KEY" in detail
+        assert "BRAVE_SEARCH_API_KEY" in detail
+        assert "EXA_API_KEY" in detail
+        assert "FIRECRAWL_API_KEY" in detail
+        assert "SEARXNG_URL" in detail
+        # The keyless DDGS backend is the simplest unblock — must
+        # be called out so operators on a lightweight install know
+        # `pip install ddgs` works without any API key.
+        assert "ddgs" in detail
+
     def test_unknown_toolset_returns_empty_string(self):
         # Doctor falls back to the generic "(system dependency not met)"
         # when the helper returns "".

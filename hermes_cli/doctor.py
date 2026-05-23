@@ -147,6 +147,12 @@ def _doctor_tool_unavailable_detail(toolset: str) -> str:
     if toolset == "video_gen":
         return ("no video-gen provider configured — set FAL_KEY, "
                 "XAI_API_KEY, or use xAI OAuth (see `hermes tools`)")
+    if toolset == "web":
+        return ("no web-search provider configured — set "
+                "TAVILY_API_KEY, BRAVE_SEARCH_API_KEY, EXA_API_KEY, "
+                "FIRECRAWL_API_KEY, or SEARXNG_URL; or "
+                "`pip install ddgs` for the keyless DuckDuckGo "
+                "backend (see `hermes tools`)")
     return ""
 
 
