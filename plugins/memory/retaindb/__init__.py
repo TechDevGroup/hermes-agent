@@ -477,6 +477,59 @@ class RetainDBMemoryProvider(MemoryProvider):
     def is_available(self) -> bool:
         return bool(os.environ.get("RETAINDB_API_KEY"))
 
+    def health_check(self) -> tuple[bool, str]:
+        """Probe RetainDB by GET-ing ``/v1/memory/profile/<probe-id>``
+        with the configured key. Side-effect-free; just validates
+        auth + base_url reachability.
+
+        Returns (RFC #42 conventions):
+          (True, "")                  — profile GET succeeds.
+          (False, "no_api_key")       — RETAINDB_API_KEY unset.
+          (False, "sdk_missing")      — `requests` not installed.
+          (False, "auth: ...")        — 401/403/forbidden/
+                                         unauthorized/invalid-api-key/
+                                         authentication.
+          (False, "not_found: ...")   — 404 (wrong base_url or
+                                         project routing missing).
+          (False, "unreachable: ...") — anything else.
+
+        MUST NOT raise.
+        """
+        api_key = os.environ.get("RETAINDB_API_KEY", "")
+        if not api_key:
+            return (False, "no_api_key")
+        base_url = re.sub(
+            r"/+$", "",
+            os.environ.get("RETAINDB_BASE_URL", _DEFAULT_BASE_URL))
+        project = os.environ.get("RETAINDB_PROJECT", "default")
+        try:
+            import requests  # noqa: F401
+        except ImportError:
+            return (False, "sdk_missing")
+        try:
+            client = _Client(api_key=api_key, base_url=base_url,
+                              project=project)
+            client.get_profile("hermes-doctor-probe")
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            msg_lc = msg.lower()
+            # _Client.request raises with the status code embedded
+            # in the message — pattern match for the classes we care
+            # about.
+            if (
+                "401" in msg
+                or "403" in msg
+                or "unauthorized" in msg_lc
+                or "forbidden" in msg_lc
+                or "invalid api key" in msg_lc
+                or "authentication" in msg_lc
+            ):
+                return (False, f"auth: {msg[:200]}")
+            if "404" in msg:
+                return (False, f"not_found: {msg[:200]}")
+            return (False, f"unreachable: {msg[:200]}")
+        return (True, "")
+
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
             {"key": "api_key", "description": "RetainDB API key", "secret": True, "required": True, "env_var": "RETAINDB_API_KEY", "url": "https://retaindb.com"},
