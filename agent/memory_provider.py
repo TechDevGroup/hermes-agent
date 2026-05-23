@@ -57,6 +57,48 @@ class MemoryProvider(ABC):
         Should not make network calls — just check config and installed deps.
         """
 
+    def health_check(self) -> tuple[bool, str]:
+        """Probe the backing service and report (healthy, reason).
+
+        Called by `hermes doctor` and other diagnostic surfaces to
+        validate that the provider can actually reach its backend —
+        deeper than ``is_available()`` (which only checks config /
+        env-vars / CLI presence). Two key differences from
+        ``is_available()``:
+
+          * MAY make network calls. Doctor invokes this knowing it
+            will take 1-5 seconds; the agent hot path uses
+            ``is_available()`` instead.
+          * Returns a (bool, reason) pair so the caller can render a
+            specific error instead of a generic "not available".
+
+        Convention for the reason string (when healthy=False):
+
+          * ``"auth: <detail>"`` — credentials rejected by the backend.
+          * ``"unreachable: <detail>"`` — DNS / connection / timeout.
+          * ``"not_found: <detail>"`` — endpoint or resource 404.
+          * ``"rate_limited: <detail>"`` — 429 / quota exceeded.
+          * ``"<freeform>"`` — anything else.
+
+        Doctor uses these prefixes to choose between check_fail
+        (auth, not_found) and check_warn (unreachable, rate_limited,
+        freeform). See RFC #42 for the full migration plan.
+
+        Default implementation delegates to ``is_available()`` so
+        plugins that haven't migrated yet retain their existing
+        behavior: doctor's loud reachability surface only fires once
+        a provider opts in by overriding this method.
+
+        Implementations MUST NOT raise — return
+        ``(False, "<reason>")`` instead. Doctor invokes this in a
+        loop and a raised exception would crash the section.
+        """
+        try:
+            ok = bool(self.is_available())
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"is_available() raised: {exc}")
+        return (ok, "" if ok else "is_available() returned False")
+
     @abstractmethod
     def initialize(self, session_id: str, **kwargs) -> None:
         """Initialize for a session.

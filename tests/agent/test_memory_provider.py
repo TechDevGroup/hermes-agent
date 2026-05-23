@@ -113,6 +113,71 @@ class TestMemoryProviderABC:
         p.sync_turn("user", "assistant")
         p.shutdown()
 
+    # ── health_check() default delegation (#42) ────────────────
+
+    def test_health_check_default_delegates_to_is_available_when_true(self):
+        """Default implementation maps is_available()=True →
+        (True, '') so providers that haven't migrated yet retain
+        their existing pass-through behavior."""
+        p = FakeMemoryProvider(available=True)
+        healthy, reason = p.health_check()
+        assert healthy is True
+        assert reason == ""
+
+    def test_health_check_default_delegates_to_is_available_when_false(self):
+        """When is_available() returns False, the default impl
+        returns (False, "is_available() returned False") rather than
+        raising or returning a vague boolean."""
+        p = FakeMemoryProvider(available=False)
+        healthy, reason = p.health_check()
+        assert healthy is False
+        assert "is_available" in reason
+
+    def test_health_check_default_catches_is_available_exception(self):
+        """RFC #42 contract: health_check must never raise. If a
+        provider's is_available throws, the default impl converts
+        that into (False, '<reason>') so doctor's loop is safe."""
+
+        class _ExplodingProvider(FakeMemoryProvider):
+            def is_available(self) -> bool:
+                raise RuntimeError("config corrupted")
+
+        p = _ExplodingProvider()
+        healthy, reason = p.health_check()
+        assert healthy is False
+        assert "raised" in reason
+        assert "config corrupted" in reason
+
+    def test_health_check_override_takes_precedence(self):
+        """When a provider implements its own health_check (e.g.
+        Mem0 + Honcho post-#42 migration), it replaces the default
+        delegation. Verifies the ABC method is overridable."""
+
+        class _ProbingProvider(FakeMemoryProvider):
+            def __init__(self, *, available_reports=True,
+                         probe_result=(True, "")):
+                super().__init__(available=available_reports)
+                self._probe_result = probe_result
+                self.probe_calls = 0
+
+            def health_check(self):
+                self.probe_calls += 1
+                return self._probe_result
+
+        # Even when is_available reports True, an override can fail.
+        p = _ProbingProvider(available_reports=True,
+                              probe_result=(False, "auth: rejected"))
+        healthy, reason = p.health_check()
+        assert healthy is False
+        assert reason == "auth: rejected"
+        assert p.probe_calls == 1
+        # And vice-versa: an override can succeed where
+        # is_available was False (rare but legal — e.g. recovers
+        # from a stale config check).
+        p2 = _ProbingProvider(available_reports=False,
+                               probe_result=(True, ""))
+        assert p2.health_check() == (True, "")
+
 
 # ---------------------------------------------------------------------------
 # MemoryManager tests
