@@ -418,18 +418,17 @@ class TestDoctorMemoryProviderSection:
         assert "Memory Provider" in out
         assert "Built-in memory active" not in out
 
-    def test_generic_provider_wording_no_longer_implies_reachability(
+    def test_generic_provider_dispatches_to_health_check(
             self, monkeypatch, tmp_path):
-        """#36: generic providers (e.g. openviking) only check env-var
-        presence in is_available(). Doctor must not say "active"
-        (implies reachable); must say "configured" + flag the gap."""
-        # Stub load_memory_provider to return a SimpleNamespace whose
-        # is_available() returns True without any network call —
-        # mirrors the production openviking/supermemory/etc. shape.
+        """#42 step 3: doctor's unified memory-provider dispatch
+        now calls health_check() on every provider — no per-provider
+        elif blocks. A provider returning (True, "") shows up as
+        "<name> reachable" in the output."""
         from types import SimpleNamespace
 
         fake = SimpleNamespace(
             is_available=lambda: True,
+            health_check=lambda: (True, ""),
             name=lambda: "openviking",
         )
         import plugins.memory as _mem_pkg
@@ -437,12 +436,51 @@ class TestDoctorMemoryProviderSection:
                             lambda name: fake)
         out = self._run_doctor_and_capture(monkeypatch, tmp_path,
                                             provider="openviking")
-        assert "openviking provider configured" in out
+        assert "openviking reachable" in out
+        # The pre-#42-step-3 wording is gone.
         assert "openviking provider active" not in out
-        # The info row must point at the open issue so operators can
-        # follow the design discussion if they care.
-        assert "#36" in out
-        assert "backend reachability not probed" in out
+        assert "openviking provider configured" not in out
+        assert "backend reachability not probed" not in out
+
+    def test_generic_provider_dispatches_auth_failure_as_fail(
+            self, monkeypatch, tmp_path):
+        """#42 step 3: when a provider returns a "auth:" reason,
+        doctor maps it to _fail_and_issue (red row + issue list
+        entry), not check_warn."""
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(
+            is_available=lambda: True,
+            health_check=lambda: (False, "auth: 401 invalid key"),
+            name=lambda: "mem0",
+        )
+        import plugins.memory as _mem_pkg
+        monkeypatch.setattr(_mem_pkg, "load_memory_provider",
+                            lambda name: fake)
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path,
+                                            provider="mem0")
+        assert "mem0 auth rejected" in out
+        assert "401 invalid key" in out
+
+    def test_generic_provider_dispatches_unreachable_as_warn(
+            self, monkeypatch, tmp_path):
+        """unreachable: prefix → check_warn (transient, key may
+        still be valid)."""
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(
+            is_available=lambda: True,
+            health_check=lambda: (False, "unreachable: connection refused"),
+            name=lambda: "honcho",
+        )
+        import plugins.memory as _mem_pkg
+        monkeypatch.setattr(_mem_pkg, "load_memory_provider",
+                            lambda name: fake)
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path,
+                                            provider="honcho")
+        assert "honcho unreachable" in out
+        assert "connection refused" in out
+        assert "credentials may still be valid" in out
 
 
 def test_run_doctor_termux_treats_docker_and_browser_warnings_as_expected(monkeypatch, tmp_path):

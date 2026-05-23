@@ -2235,143 +2235,106 @@ def run_doctor(args):
 
     if not _active_memory_provider:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
-    elif _active_memory_provider == "honcho":
-        try:
-            from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
-            hcfg = HonchoClientConfig.from_global_config()
-            _honcho_cfg_path = resolve_config_path()
-
-            if not _honcho_cfg_path.exists():
-                check_warn("Honcho config not found", "run: hermes memory setup")
-            elif not hcfg.enabled:
-                check_info(f"Honcho disabled (set enabled: true in {_honcho_cfg_path} to activate)")
-            elif not (hcfg.api_key or hcfg.base_url):
-                _fail_and_issue(
-                    "Honcho API key or base URL not set",
-                    "run: hermes memory setup",
-                    "No Honcho API key — run 'hermes memory setup'",
-                    issues,
-                )
-            else:
-                from plugins.memory.honcho.client import get_honcho_client, reset_honcho_client
-                reset_honcho_client()
-                try:
-                    get_honcho_client(hcfg)
-                    check_ok(
-                        "Honcho connected",
-                        f"workspace={hcfg.workspace_id} mode={hcfg.recall_mode} freq={hcfg.write_frequency}",
-                    )
-                except Exception as _e:
-                    _fail_and_issue("Honcho connection failed", str(_e), f"Honcho unreachable: {_e}", issues)
-        except ImportError:
-            _fail_and_issue(
-                "honcho-ai not installed",
-                "pip install honcho-ai",
-                "Honcho is set as memory provider but honcho-ai is not installed",
-                issues,
-            )
-        except Exception as _e:
-            check_warn("Honcho check failed", str(_e))
-    elif _active_memory_provider == "mem0":
-        try:
-            from plugins.memory.mem0 import _load_config as _load_mem0_config
-            mem0_cfg = _load_mem0_config()
-            mem0_key = mem0_cfg.get("api_key", "")
-            mem0_user = mem0_cfg.get("user_id", "hermes-user")
-            mem0_agent = mem0_cfg.get("agent_id", "hermes")
-            if not mem0_key:
-                _fail_and_issue(
-                    "Mem0 API key not set",
-                    "(set MEM0_API_KEY in .env or run hermes memory setup)",
-                    "Mem0 is set as memory provider but API key is missing",
-                    issues,
-                )
-            else:
-                # Probe with a minimal API call so a wrong / expired key
-                # surfaces here instead of failing at first-request time
-                # in production (see #34). Honcho already does this via
-                # get_honcho_client(); Mem0 didn't.
-                try:
-                    from mem0 import MemoryClient
-                    _mem0_client = MemoryClient(api_key=mem0_key)
-                    _mem0_client.get_all(user_id=mem0_user, limit=1)
-                except ImportError:
-                    _fail_and_issue(
-                        "mem0ai not installed",
-                        "pip install mem0ai",
-                        "Mem0 is set as memory provider but mem0ai SDK is not installed",
-                        issues,
-                    )
-                except Exception as _mp_exc:  # noqa: BLE001
-                    msg = str(_mp_exc)
-                    msg_lc = msg.lower()
-                    is_auth = (
-                        "401" in msg
-                        or "403" in msg
-                        or "unauthorized" in msg_lc
-                        or "forbidden" in msg_lc
-                        or "invalid api key" in msg_lc
-                        or "authentication" in msg_lc
-                    )
-                    if is_auth:
-                        _fail_and_issue(
-                            "Mem0 auth rejected",
-                            msg[:200],
-                            "Mem0 API key rejected — verify MEM0_API_KEY "
-                            "at https://app.mem0.ai",
-                            issues,
-                        )
-                    else:
-                        check_warn(
-                            "Mem0 probe failed",
-                            f"{msg[:200]} "
-                            "(network down, SDK changed, or transient — "
-                            "the key itself may still be valid)",
-                        )
-                else:
-                    check_ok(
-                        "Mem0 connected",
-                        f"user_id={mem0_user} agent_id={mem0_agent}",
-                    )
-        except ImportError:
-            _fail_and_issue(
-                "Mem0 plugin not loadable",
-                "pip install mem0ai",
-                "Mem0 is set as memory provider but mem0ai is not installed",
-                issues,
-            )
-        except Exception as _e:
-            check_warn("Mem0 check failed", str(_e))
     else:
-        # Generic check for other memory providers (openviking,
-        # supermemory, hindsight, byterover, retaindb, holographic).
-        # Each provider's `is_available()` only checks env-vars / CLI
-        # presence — it does NOT probe backend reachability (#36).
-        # Until a `health_check()` ABC method lands, the most we can
-        # truthfully say is "config detected" — not "active".
+        # Unified memory-provider probe (#42). Every shipped provider
+        # now implements `health_check() -> (bool, reason)` with the
+        # RFC #42 reason-prefix taxonomy. Doctor dispatches on the
+        # prefix to choose check_ok / _fail_and_issue / check_warn.
         try:
             from plugins.memory import load_memory_provider
             _provider = load_memory_provider(_active_memory_provider)
-            if _provider and _provider.is_available():
-                check_ok(
-                    f"{_active_memory_provider} provider configured")
-                check_info(
-                    "is_available() reports True (env vars / CLI "
-                    "present) — backend reachability not probed by "
-                    "doctor. Honcho + Mem0 do real probes; other "
-                    "providers wait on a `health_check()` ABC method. "
-                    "See TechDevGroup/hermes-agent#36.")
-            elif _provider:
-                check_warn(
-                    f"{_active_memory_provider} configured but not available",
-                    "run: hermes memory status")
-            else:
-                check_warn(
-                    f"{_active_memory_provider} plugin not found",
-                    "run: hermes memory setup")
         except Exception as _e:
-            check_warn(
-                f"{_active_memory_provider} check failed", str(_e))
+            _provider = None
+            check_warn(f"{_active_memory_provider} plugin not loadable",
+                       str(_e))
+            _provider = None
+
+        if _provider is None and _active_memory_provider:
+            # load_memory_provider returned None — plugin not on disk.
+            # Skip the dispatch below (the except-branch above already
+            # surfaced a warn if the load itself raised).
+            pass
+        elif _provider is None:
+            check_warn(f"{_active_memory_provider} plugin not found",
+                       "run: hermes memory setup")
+        else:
+            try:
+                _healthy, _reason = _provider.health_check()
+            except Exception as _e:  # noqa: BLE001
+                # RFC #42 contract says health_check MUST NOT raise.
+                # A propagating exception is a provider bug — surface
+                # it as a warn and keep going.
+                _healthy, _reason = False, f"health_check_raised: {_e}"
+
+            _pname = _active_memory_provider
+            _prefix, _, _detail = _reason.partition(":")
+            _detail = _detail.strip()
+            if _healthy:
+                check_ok(f"{_pname} reachable")
+            elif _reason == "no_api_key" or _reason == "no_credentials":
+                _fail_and_issue(
+                    f"{_pname} not configured",
+                    "run: hermes memory setup",
+                    f"{_pname} is set as memory provider but credentials are missing",
+                    issues,
+                )
+            elif _reason == "no_url" or _reason == "no_endpoint":
+                _fail_and_issue(
+                    f"{_pname} URL not set",
+                    "set the provider's *_BASE_URL / *_API_URL / "
+                    "*_ENDPOINT env var, or run: hermes memory setup",
+                    f"{_pname} URL not configured",
+                    issues,
+                )
+            elif _reason == "no_config":
+                check_warn(f"{_pname} config not found",
+                           "run: hermes memory setup")
+            elif _reason == "disabled":
+                check_info(f"{_pname} disabled in config")
+            elif _reason == "sdk_missing" or _prefix == "sdk_missing":
+                _fail_and_issue(
+                    f"{_pname} SDK not installed",
+                    "see the provider's plugin docs for the correct "
+                    "`pip install` package",
+                    f"{_pname} SDK missing — see plugin docs",
+                    issues,
+                )
+            elif _prefix == "auth":
+                _fail_and_issue(
+                    f"{_pname} auth rejected",
+                    _detail[:200],
+                    f"{_pname} authentication rejected — verify the "
+                    "configured API key / token",
+                    issues,
+                )
+            elif _prefix == "not_found":
+                _fail_and_issue(
+                    f"{_pname} endpoint not found",
+                    _detail[:200],
+                    f"{_pname} returned 404 — verify the configured base URL",
+                    issues,
+                )
+            elif _prefix == "http":
+                check_warn(f"{_pname} unexpected HTTP status",
+                           _detail[:200])
+            elif _prefix == "unreachable":
+                check_warn(f"{_pname} unreachable",
+                           f"{_detail[:200]} "
+                           "(network down, server restarting, or "
+                           "transient — credentials may still be valid)")
+            elif _prefix == "config_error":
+                check_warn(f"{_pname} config error",
+                           _detail[:200])
+            elif _prefix == "health_check_raised":
+                check_warn(f"{_pname} health_check raised",
+                           f"{_detail[:200]} (RFC #42 contract: "
+                           "health_check must not raise; "
+                           "treat as provider bug)")
+            else:
+                # Unknown reason — surface verbatim. Better than
+                # swallowing.
+                check_warn(f"{_pname} health check failed",
+                           _reason[:200])
 
     _check_devagentic_graph()
     _check_cron_scheduler()

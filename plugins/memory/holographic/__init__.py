@@ -128,6 +128,48 @@ class HolographicMemoryProvider(MemoryProvider):
     def is_available(self) -> bool:
         return True  # SQLite is always available, numpy is optional
 
+    def health_check(self) -> tuple[bool, str]:
+        """Probe holographic by verifying the db_path's parent
+        directory is writable. There's no remote service to ping,
+        but a read-only HERMES_HOME (RO mount, wrong perms) would
+        still break the provider at runtime — so the probe is
+        meaningful.
+
+        Returns (RFC #42 conventions):
+          (True, "")                     — parent writable.
+          (False, "unreachable: <msg>")  — mkdir failed or not writable.
+          (False, "config_error: <msg>") — config load itself raised.
+
+        MUST NOT raise.
+        """
+        from pathlib import Path as _Path
+        import os as _os
+        try:
+            from hermes_constants import get_hermes_home
+            hermes_home = str(get_hermes_home())
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"config_error: {exc}")
+
+        try:
+            db_path = str(self._config.get(
+                "db_path", f"{hermes_home}/memory_store.db"))
+            db_path = db_path.replace("$HERMES_HOME", hermes_home)
+            db_path = db_path.replace("${HERMES_HOME}", hermes_home)
+            parent = _Path(db_path).parent
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                return (False,
+                        f"unreachable: db_path parent {parent} "
+                        f"unwritable ({exc})")
+            if not _os.access(parent, _os.W_OK):
+                return (False,
+                        f"unreachable: db_path parent {parent} "
+                        "not writable (check filesystem permissions)")
+        except Exception as exc:  # noqa: BLE001
+            return (False, f"config_error: {exc}")
+        return (True, "")
+
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.hermes-memory-store."""
         from pathlib import Path
