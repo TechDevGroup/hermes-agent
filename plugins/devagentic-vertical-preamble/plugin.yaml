@@ -1,0 +1,7 @@
+name: devagentic-vertical-preamble
+version: 0.1.0
+description: "Auto-loads the active hermes profile's vertical context (kind:vertical-spec + kind:grafted-context + kind:worker-guardrails docs) as preamble on session boot. Mirrors the devagentic-canvas plugin pattern but for verticals — the docs spinUpVertical wrote on the devagentic side are surfaced once per process via a pre_llm_call hook. Closes G1 of devagentic#203."
+author: TechDevGroup
+kind: standalone
+hooks:
+  - pre_llm_call
