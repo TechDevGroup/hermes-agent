@@ -99,21 +99,27 @@ def _post_graphql(query: str, variables: dict,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        # HTTPError is a URLError subclass; classify_http_error (#38)
+        # handles all four kinds in one dispatch.
+        from utils import (
+            classify_http_error,
+            HTTP_ERROR_AUTH,
+            HTTP_ERROR_NOT_FOUND,
+            HTTP_ERROR_HTTP,
+        )
+        kind = classify_http_error(exc)
+        if kind == HTTP_ERROR_AUTH:
             msg = ("authentication failed — set DEVAGENTIC_API_KEY "
                    "(any non-empty value works when devagentic runs "
                    "in trust-header mode)")
-        elif exc.code == 404:
+        elif kind == HTTP_ERROR_NOT_FOUND:
             msg = f"not found at {url}"
+        elif kind == HTTP_ERROR_HTTP:
+            msg = f"HTTP {getattr(exc, 'code', '?')} from {url}"
         else:
-            msg = f"HTTP {exc.code} from {url}"
-        logger.debug("docs client: %s %s → %s", "POST", url, msg)
-        _record_error(msg)
-        return None
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        msg = f"unreachable at {url} ({exc})"
-        logger.debug("docs client: %s", msg)
+            msg = f"unreachable at {url} ({exc})"
+        logger.debug("docs client: POST %s → %s", url, msg)
         _record_error(msg)
         return None
     try:

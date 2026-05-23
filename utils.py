@@ -359,3 +359,50 @@ def base_url_host_matches(base_url: str, domain: str) -> bool:
     if not domain:
         return False
     return hostname == domain or hostname.endswith("." + domain)
+
+
+# ---------------------------------------------------------------------------
+# urllib error classification (#38)
+#
+# Several modules dispatch on urllib HTTPError / URLError / OSError /
+# TimeoutError to decide whether a failure is auth / not-found / network /
+# other. Each callsite then formats its own user-facing message. Extracting
+# the classification keeps the message text local while consolidating the
+# dispatch rules.
+# ---------------------------------------------------------------------------
+
+# Kind constants — callers can compare against these without importing
+# urllib directly.
+HTTP_ERROR_AUTH = "auth"
+HTTP_ERROR_NOT_FOUND = "not_found"
+HTTP_ERROR_HTTP = "http"
+HTTP_ERROR_UNREACHABLE = "unreachable"
+HTTP_ERROR_UNKNOWN = "unknown"
+
+
+def classify_http_error(exc: BaseException) -> str:
+    """Classify a urllib-style exception into one of:
+
+      * ``"auth"``         — HTTP 401 / 403
+      * ``"not_found"``    — HTTP 404
+      * ``"http"``         — any other HTTP status code from HTTPError
+      * ``"unreachable"``  — URLError / OSError / TimeoutError (DNS,
+                              connection refused, timeout, etc.)
+      * ``"unknown"``      — anything else (callers should treat this as
+                              a programmer error, not an operational one)
+
+    Callers format the user-facing message themselves — this helper only
+    answers "which class of failure is this".
+    """
+    import urllib.error as _urllib_error
+
+    if isinstance(exc, _urllib_error.HTTPError):
+        code = getattr(exc, "code", None)
+        if code in (401, 403):
+            return HTTP_ERROR_AUTH
+        if code == 404:
+            return HTTP_ERROR_NOT_FOUND
+        return HTTP_ERROR_HTTP
+    if isinstance(exc, (_urllib_error.URLError, OSError, TimeoutError)):
+        return HTTP_ERROR_UNREACHABLE
+    return HTTP_ERROR_UNKNOWN
