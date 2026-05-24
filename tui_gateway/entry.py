@@ -201,6 +201,18 @@ def main():
     # import is wasted.  Check the config first (cheap — it's already been
     # loaded once by ``_config_mtime`` elsewhere) and only pay the import
     # cost when there's actually MCP work to do.
+    # hermes-agent#82 — auto-register the bundled mcp_serve as
+    # `hermes-internal` (stdio) before reading mcp_servers, so a fresh
+    # worker session boots with G2/G3/G4 MCP tools available without
+    # any operator-side config. Idempotent + opt-out via
+    # HERMES_DISABLE_INTERNAL_MCP=1.
+    try:
+        from hermes_cli.mcp_autowire import ensure_internal_mcp_server
+        ensure_internal_mcp_server()
+    except Exception:
+        # Auto-wire is best-effort; never block worker startup on it.
+        pass
+
     try:
         from hermes_cli.config import read_raw_config
         _mcp_servers = (read_raw_config() or {}).get("mcp_servers")
