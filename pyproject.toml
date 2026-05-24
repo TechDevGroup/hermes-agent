@@ -214,9 +214,29 @@ py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajector
 hermes_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
 gateway = ["assets/**/*"]
 plugins = [
-  "*/dashboard/manifest.json",
-  "*/dashboard/dist/*",
-  "*/dashboard/dist/**/*",
+  # hermes-agent#76 — plugin.yaml is REQUIRED by the loader
+  # (hermes_cli/plugins.py expects both __init__.py AND plugin.yaml per
+  # plugin directory). Without these, every devagentic-* plugin
+  # (G1/G2/G3/G4 + canvas + docs + memory + skills) is silently skipped
+  # at install time. ** patterns handle the depth-2 form
+  # (plugins/X/plugin.yaml) AND deeper forms (plugins/web/X/plugin.yaml,
+  # plugins/model-providers/X/plugin.yaml, etc.).
+  "**/plugin.yaml",
+  "**/plugin.yml",
+  # Operator-facing docs ship with their plugin (README per plugin,
+  # SKILL.md under plugins/*/skills/*).
+  "**/*.md",
+  "**/*.txt",
+  # Plugin-bundled JSON config (e.g. dashboard manifest, skill schemas).
+  "**/*.json",
+  # Static assets bundled with plugins (canvas dashboard, etc.).
+  "**/dashboard/dist/*",
+  "**/dashboard/dist/**/*",
+  "**/skills/**/*",
+  "**/*.js",
+  "**/*.css",
+  "**/*.png",
+  "**/*.service",
 ]
 
 [tool.setuptools.packages.find]

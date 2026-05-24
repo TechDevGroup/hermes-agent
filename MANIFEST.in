@@ -1,4 +1,11 @@
 graft skills
 graft optional-skills
+# hermes-agent#76 — ship plugin.yaml + per-plugin README + bundled
+# JSON/assets so the loader (hermes_cli/plugins.py) sees them in the
+# pip-installed wheel. Without this, every devagentic-* plugin is
+# silently skipped on install.
+recursive-include plugins *.yaml *.yml *.md *.txt *.json
+recursive-include plugins/*/skills *
+recursive-include plugins/*/dashboard *
 global-exclude __pycache__
 global-exclude *.py[cod]
