@@ -34,11 +34,13 @@ logger = logging.getLogger(__name__)
 _LOADED_USER_IDS: set[str] = set()
 
 
-# Caps — keep the preamble bounded even when a vertical has many
-# grafts or long content. Operators can tune by re-rendering with
-# tighter limits in a follow-up; v0 picks safe defaults.
-_PER_GRAFT_CONTENT_CHARS = 2048
-_MAX_GRAFTS_RENDERED = 8
+# Caps — index-only rendering (hermes-agent#71) keeps the preamble
+# bounded automatically. _ABSTRACT_CHARS sets the per-graft summary
+# length in the index; full bodies are NEVER in the preamble (worker
+# fetches on demand via the grafted_context_fetch MCP tool).
+# _MAX_TOTAL_PREAMBLE_CHARS remains as a safety net for pathological
+# guardrails / vertical-spec sizes.
+_ABSTRACT_CHARS = 120  # 1-line abstract from the first 120 chars of content
 _MAX_TOTAL_PREAMBLE_CHARS = 32768
 
 
@@ -96,30 +98,37 @@ def _render_preamble(rollup: dict) -> Optional[str]:
                 lines.append("")
                 lines.append(text)
     if grafts:
-        shown = grafts[:_MAX_GRAFTS_RENDERED]
-        suffix = (
-            f", showing first {_MAX_GRAFTS_RENDERED}"
-            if len(grafts) > _MAX_GRAFTS_RENDERED else ""
-        )
+        # v2 (hermes-agent#71): render INDEX only, NOT full bodies.
+        # Workers fetch bodies on demand via the grafted_context_fetch
+        # MCP tool. Cuts per-turn preamble cost from ~16KB (8 grafts at
+        # 2KB cap) to ~50-150 chars per indexed graft. Scales to
+        # hundreds of grafts without saturating model attention.
         lines.append("")
         lines.append(
-            f"### Grafted concept material ({len(grafts)} doc"
-            + ("s" if len(grafts) != 1 else "") + f"{suffix})"
+            f"### Grafted concept material — INDEX ({len(grafts)} doc"
+            + ("s" if len(grafts) != 1 else "") + ")"
         )
-        for g in shown:
-            src = g.get("source") or "(unknown source)"
+        lines.append(
+            "Full bodies are NOT included in this preamble. Use the "
+            "`grafted_context_fetch(graft_id)` MCP tool to load any "
+            "row\'s full content on demand — typical pattern is to "
+            "skim the index, identify relevant rows by source/path/"
+            "abstract, then fetch only what you need for the current "
+            "turn."
+        )
+        lines.append("")
+        for g in grafts:
+            gid = g.get("id") or "(no-id)"
+            src = g.get("source") or "(unknown)"
             path = g.get("path") or "(no path)"
-            sha = (g.get("sha") or "")[:8]
             content = (g.get("content") or "").strip()
-            if len(content) > _PER_GRAFT_CONTENT_CHARS:
-                content = (
-                    content[:_PER_GRAFT_CONTENT_CHARS]
-                    + "\n…(truncated; see source for full body)"
-                )
-            lines.append("")
-            lines.append(f"#### `{path}` ({src} @ `{sha}`)")
-            if content:
-                lines.append(content)
+            abstract = content[:_ABSTRACT_CHARS].replace("\n", " ").strip()
+            if len(content) > _ABSTRACT_CHARS:
+                abstract = abstract + "…"
+            # One-line index entry. Markdown table-like for grep-ability.
+            lines.append(
+                f"- `{gid}` · {src} · `{path}` — {abstract}"
+            )
     rendered = "\n".join(lines)
     if len(rendered) > _MAX_TOTAL_PREAMBLE_CHARS:
         rendered = (
