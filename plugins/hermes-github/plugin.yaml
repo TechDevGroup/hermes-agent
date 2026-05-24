@@ -1,0 +1,5 @@
+name: hermes-github
+version: 0.1.0
+description: "Worker-facing fileIssue MCP tool — surfaces stack gaps as GitHub issues on TechDevGroup/devagentic or TechDevGroup/hermes-agent. Closes G3 of TechDevGroup/devagentic#203. Token resolved on the hermes host (env / gh CLI); workers never see credentials. Restricted to the two stack repos."
+author: TechDevGroup
+kind: standalone
