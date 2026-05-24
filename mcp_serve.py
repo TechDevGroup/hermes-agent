@@ -875,6 +875,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     _register_canvas_tools(mcp)
     _register_docs_tools(mcp)
     _register_devagentic_mutation_tools(mcp)
+    _register_github_tools(mcp)
 
     return mcp
 
@@ -1536,4 +1537,96 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
         if rollup is None:
             return _err("confer_run failed" + _reason(c))
         return json.dumps(rollup, indent=2)
+
+
+def _resolve_github_client():
+    """Load the hermes-github plugin's client module. Same file-path
+    import pattern as the other resolvers. Returns ``None`` when the
+    plugin isn't present; tool then surfaces
+    ``{"error": "hermes-github plugin not available …"}`` without
+    crashing the MCP server."""
+    try:
+        import importlib.util
+        from pathlib import Path
+        plugin_dir = (Path(__file__).resolve().parent
+                      / "plugins" / "hermes-github")
+        client_path = plugin_dir / "client.py"
+        if not client_path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(
+            "_hermes_github_client", client_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("github MCP: plugin client unavailable: %s", exc)
+        return None
+
+
+def _register_github_tools(mcp: "FastMCP") -> None:
+    """Register the hermes-github MCP tool on ``mcp``. Closes G3
+    (hermes-agent#57) of devagentic#203.
+
+    Tools registered:
+      * ``file_issue`` — open an issue on TechDevGroup/devagentic
+        or TechDevGroup/hermes-agent. Restricted by design to those
+        two stack repos. Auth token resolved on the hermes host
+        (env or ``gh auth token``); the worker conversation never
+        sees credentials.
+    """
+
+    def _err(msg: str) -> str:
+        return json.dumps({"error": msg})
+
+    def _reason(c) -> str:
+        try:
+            t = c.last_error_text()
+        except Exception:  # noqa: BLE001
+            return ""
+        return f" ({t})" if t else ""
+
+    @mcp.tool()
+    def file_issue(repo: str, title: str, body: str,
+                   labels: Optional[List[str]] = None) -> str:
+        """Open a GitHub issue on a TechDevGroup stack repo.
+
+        Use this when you discover a stack gap (missing capability,
+        broken behavior, bug) in devagentic or hermes-agent — per
+        devagentic#203 §3.2, this is the ONLY way to report stack
+        issues. NEVER edit stack source from a worker session.
+
+        Args:
+            repo: ``"devagentic"`` or ``"hermes-agent"`` — anything
+                else is rejected.
+            title: Short issue title.
+            body: Issue body (markdown). Include enough context for
+                the stack maintainer to reproduce + understand the
+                gap.
+            labels: Optional list of label names (e.g.
+                ``["bug", "needs-triage"]``).
+
+        Returns: JSON ``{"number": int, "url": str, "html_url": str,
+        "title": str, "state": str}`` on success, or
+        ``{"error": ...}``.
+        """
+        c = _resolve_github_client()
+        if c is None:
+            return _err("hermes-github plugin not available "
+                        "(missing plugins/hermes-github/)")
+        if not repo:
+            allowed = sorted(c.allowed_repos()) if hasattr(c, "allowed_repos") else []
+            return _err(f"repo is required (allowed: {allowed})")
+        if not title or not title.strip():
+            return _err("title is required (non-empty)")
+        if not body or not body.strip():
+            return _err("body is required (non-empty)")
+        result = c.file_issue(
+            repo=repo, title=title, body=body,
+            labels=list(labels) if labels else None,
+        )
+        if result is None:
+            return _err("file_issue failed" + _reason(c))
+        return json.dumps(result, indent=2)
 
