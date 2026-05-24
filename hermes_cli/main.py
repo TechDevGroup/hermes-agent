@@ -12748,6 +12748,22 @@ Examples:
                 "plugin discovery failed at CLI startup",
                 exc_info=True,
             )
+        # hermes-agent#82 — auto-register the bundled mcp_serve as
+        # `hermes-internal` BEFORE discover_mcp_tools reads the config,
+        # so a fresh `hermes` CLI invocation boots with G2/G3/G4 MCP
+        # tools available without operator config. The tui_gateway/entry.py
+        # call (also from #82) covers the TUI-gateway subprocess path;
+        # this covers the direct CLI path. Idempotent + opt-out via
+        # HERMES_DISABLE_INTERNAL_MCP=1.
+        try:
+            from hermes_cli.mcp_autowire import ensure_internal_mcp_server
+
+            ensure_internal_mcp_server()
+        except Exception:
+            logger.debug(
+                "mcp_serve auto-wire failed at CLI startup",
+                exc_info=True,
+            )
         try:
             # MCP tool discovery — no event loop running in CLI/TUI startup,
             # so inline is safe.  Moved here from model_tools.py module scope
