@@ -1762,4 +1762,14 @@ def _register_lane_h_tools(mcp: "FastMCP") -> None:
         if doc is None:
             return _err("grafted_context_fetch failed" + _reason(c))
         return json.dumps(doc, indent=2)
-
+if __name__ == "__main__":
+    # hermes-agent#82 — enables `python -m mcp_serve` as a stdio MCP
+    # server, which `ensure_internal_mcp_server()` (hermes_cli/mcp_autowire.py)
+    # registers under `mcp_servers.hermes-internal` so worker sessions
+    # auto-discover the hermes-internal MCP tool surface (G2 mutations,
+    # G3 file_issue, G4 lane-h + grafted-context) without any operator
+    # config. Honors a single optional ``--verbose`` flag for debugging
+    # the subprocess from outside.
+    import sys as _sys
+    _verbose = "--verbose" in _sys.argv[1:] or "-v" in _sys.argv[1:]
+    run_mcp_server(verbose=_verbose)
