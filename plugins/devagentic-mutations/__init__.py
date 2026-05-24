@@ -23,3 +23,15 @@ import logging
 
 
 logger = logging.getLogger(__name__)
+
+
+def register(ctx) -> None:
+    """Plugin loader entrypoint (hermes-agent#78). MCP-only plugin —
+    ``silo_query`` + ``confer_run`` tools are registered server-side in
+    ``mcp_serve.py::_register_devagentic_mutation_tools`` (callable
+    from MCP clients including hermes-internal MCP-client bridges).
+    Nothing to wire through the plugin loader directly.
+
+    register() exists so the loader doesn't warn `no register()` and
+    skip the plugin; the plugin-yaml declares the surface as MCP."""
+    logger.debug("devagentic-mutations: loaded (MCP-only; tools via mcp_serve)")

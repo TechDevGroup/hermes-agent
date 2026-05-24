@@ -25,5 +25,20 @@ from __future__ import annotations
 
 import logging
 
+from . import preamble as _preamble
+
 
 logger = logging.getLogger(__name__)
+
+
+def register(ctx) -> None:
+    """Plugin loader entrypoint (hermes-agent#78). Wires the
+    ``pre_llm_call`` hook to ``preamble.on_pre_llm_call`` — without
+    this, the loader detects no register() and the plugin is silently
+    inert (warns + skips wiring per ``hermes_cli/plugins.py:1184``).
+
+    The hook auto-loads vertical-spec + grafted-context index +
+    worker-guardrails on the first LLM call of the process. Per-process
+    gate inside the hook keeps it from re-injecting on every turn.
+    See plugin.yaml `hooks: [pre_llm_call]` for the manifest contract."""
+    ctx.register_hook("pre_llm_call", _preamble.on_pre_llm_call)

@@ -20,3 +20,14 @@ import logging
 
 
 logger = logging.getLogger(__name__)
+
+
+def register(ctx) -> None:
+    """Plugin loader entrypoint (hermes-agent#78). MCP-only plugin —
+    ``file_issue`` tool is registered server-side in
+    ``mcp_serve.py::_register_github_tools``. Nothing to wire through
+    the plugin loader directly.
+
+    register() exists so the loader doesn't warn `no register()` and
+    skip the plugin."""
+    logger.debug("hermes-github: loaded (MCP-only; file_issue via mcp_serve)")
