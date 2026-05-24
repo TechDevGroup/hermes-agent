@@ -211,3 +211,60 @@ def fetch_reasoning_graft(
         )
         return None
     return top
+
+
+_GRAFTED_CONTEXT_BY_ID_QUERY = """query($u:String!,$g:String!){
+    graftedContextById(userId:$u, graftId:$g){
+        id userId source ref sha path content ts
+    }
+}"""
+
+
+def fetch_grafted_context(
+    graft_id: str,
+    user_id: Optional[str] = None,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Optional[dict]:
+    """Wrap devagentic's ``graftedContextById(userId, graftId)`` query
+    (devagentic-side PR #220). Returns the full graft body dict
+    ``{id, userId, source, ref, sha, path, content, ts}`` on success
+    or ``None`` on failure (see ``last_error_text()``).
+
+    When ``user_id`` is None, falls back to the active profile's
+    resolved id — same pattern as ``list_reasoning_grafts``. The
+    server-side query enforces per-user scoping; passing the wrong
+    user_id returns None (no cross-vertical leakage).
+
+    Supports the lazy-load preamble pattern: G1's preamble loader
+    renders just an INDEX of graft ids; workers call this to fetch
+    full bodies on demand.
+    """
+    if not graft_id:
+        _record_error("graft_id is required")
+        return None
+    effective_uid = (user_id or "").strip() or resolve_user_id()
+    if not effective_uid:
+        _record_error(
+            "could not resolve user_id — pass user_id explicitly or "
+            "set DEVAGENTIC_USER_ID"
+        )
+        return None
+    data = _post_graphql(
+        _GRAFTED_CONTEXT_BY_ID_QUERY,
+        {"u": effective_uid, "g": graft_id},
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    doc = data.get("graftedContextById")
+    if doc is None:
+        _record_error(
+            f"no kind:grafted-context doc with id={graft_id!r} "
+            f"for user_id={effective_uid!r} (or cross-user mismatch)"
+        )
+        return None
+    if not isinstance(doc, dict):
+        _record_error("graftedContextById returned non-dict")
+        return None
+    return doc
