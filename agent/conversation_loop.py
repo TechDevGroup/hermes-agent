@@ -73,6 +73,80 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+def _diagnose_empty_response(
+    *,
+    assistant_message,
+    final_response,
+    agent,
+    finish_reason,
+    prior_was_tool,
+):
+    """Structured diagnostics for the empty-response retry path
+    (hermes-agent#67). Returns a dict the WARN log line can format:
+    provider, finish_reason, tool_calls_count, response_len,
+    response_id, prior_was_tool. Fail-soft: any attribute lookup that
+    raises collapses to a sentinel string ("?") so the log line still
+    formats cleanly even on weird provider response objects.
+
+    Pure function — no side effects, no network, no mutation. Safe to
+    call from any code path that needs the same shape diagnostics.
+    """
+    def _safe(getter):
+        try:
+            v = getter()
+            return v if v is not None else "?"
+        except Exception:  # noqa: BLE001
+            return "?"
+
+    # tool_calls count — can be on assistant_message.tool_calls (OpenAI
+    # SDK), or in a dict shape {"tool_calls": [...]}, depending on the
+    # provider's response object.
+    def _tool_calls_count():
+        _raised = False
+        try:
+            tcs = getattr(assistant_message, "tool_calls", None)
+        except Exception:  # noqa: BLE001
+            tcs = None
+            _raised = True
+        if tcs is None and not _raised and isinstance(assistant_message, dict):
+            tcs = assistant_message.get("tool_calls")
+        if tcs is None:
+            return "?" if _raised else 0
+        if not tcs:
+            return 0
+        try:
+            return len(tcs)
+        except Exception:  # noqa: BLE001
+            return "?"
+
+    def _response_id():
+        # Try the common shapes. Different SDKs differ.
+        try:
+            rid = getattr(assistant_message, "id", None)
+        except Exception:  # noqa: BLE001
+            rid = None
+        if rid:
+            return rid
+        if isinstance(assistant_message, dict):
+            return assistant_message.get("id") or "?"
+        return "?"
+
+    def _response_len():
+        try:
+            return len(final_response or "")
+        except Exception:  # noqa: BLE001
+            return "?"
+
+    return {
+        "provider": _safe(lambda: getattr(agent, "provider", "?")),
+        "finish_reason": _safe(lambda: finish_reason),
+        "tool_calls_count": _tool_calls_count(),
+        "response_len": _response_len(),
+        "response_id": _response_id(),
+        "prior_was_tool": bool(prior_was_tool),
+    }
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so callers can patch
     ``run_agent.handle_function_call`` / ``run_agent._set_interrupt`` /
@@ -3599,10 +3673,31 @@ def run_conversation(
                     )
                     if _truly_empty and (not _has_structured or _prefill_exhausted) and agent._empty_content_retries < 3:
                         agent._empty_content_retries += 1
+                        # hermes-agent#67 diagnostics: enrich the empty-response
+                        # log with response-shape context so operators can tell
+                        # genuinely-empty from tool-call-without-text from
+                        # finish_reason mismatch without re-instrumenting. Pulls
+                        # the structured info via a helper so the call site stays
+                        # readable; helper is itself fail-soft (any AttributeError
+                        # collapses to a defaults dict).
+                        _diag = _diagnose_empty_response(
+                            assistant_message=assistant_message,
+                            final_response=final_response,
+                            agent=agent,
+                            finish_reason=finish_reason,
+                            prior_was_tool=_prior_was_tool,
+                        )
                         logger.warning(
                             "Empty response (no content or reasoning) — "
-                            "retry %d/3 (model=%s)",
+                            "retry %d/3 (model=%s provider=%s "
+                            "finish_reason=%s tool_calls=%s "
+                            "response_len=%s prior_was_tool=%s response_id=%s)",
                             agent._empty_content_retries, agent.model,
+                            _diag["provider"], _diag["finish_reason"],
+                            _diag["tool_calls_count"],
+                            _diag["response_len"],
+                            _diag["prior_was_tool"],
+                            _diag["response_id"],
                         )
                         agent._emit_status(
                             f"⚠️ Empty response from model — retrying "
