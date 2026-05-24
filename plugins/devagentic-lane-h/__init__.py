@@ -34,3 +34,15 @@ import logging
 
 
 logger = logging.getLogger(__name__)
+
+
+def register(ctx) -> None:
+    """Plugin loader entrypoint (hermes-agent#78). MCP-only plugin —
+    ``lane_h_list`` + ``lane_h_fetch`` + ``grafted_context_fetch``
+    tools are registered server-side in
+    ``mcp_serve.py::_register_lane_h_tools``. Nothing to wire through
+    the plugin loader directly.
+
+    register() exists so the loader doesn't warn `no register()` and
+    skip the plugin."""
+    logger.debug("devagentic-lane-h: loaded (MCP-only; tools via mcp_serve)")
