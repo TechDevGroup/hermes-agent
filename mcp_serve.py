@@ -876,6 +876,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     _register_docs_tools(mcp)
     _register_devagentic_mutation_tools(mcp)
     _register_github_tools(mcp)
+    _register_lane_h_tools(mcp)
 
     return mcp
 
@@ -1629,4 +1630,107 @@ def _register_github_tools(mcp: "FastMCP") -> None:
         if result is None:
             return _err("file_issue failed" + _reason(c))
         return json.dumps(result, indent=2)
+
+
+def _resolve_lane_h_client():
+    """Load the devagentic-lane-h plugin's client module. Same
+    file-path import pattern as the other devagentic-adjacent
+    plugin resolvers."""
+    try:
+        import importlib.util
+        from pathlib import Path
+        plugin_dir = (Path(__file__).resolve().parent
+                      / "plugins" / "devagentic-lane-h")
+        client_path = plugin_dir / "client.py"
+        if not client_path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(
+            "_devagentic_lane_h_client", client_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("lane-h MCP: plugin client unavailable: %s", exc)
+        return None
+
+
+def _register_lane_h_tools(mcp: "FastMCP") -> None:
+    """Register the devagentic-lane-h MCP tools on ``mcp``. Closes
+    G4 (hermes-agent#58) of devagentic#203.
+
+    Tools registered:
+      * ``lane_h_list`` — list a user's recent Lane H
+        reasoning-graft-candidate docs.
+      * ``lane_h_fetch`` — fetch a single Lane H doc by id with
+        kind validation.
+
+    Depends on devagentic#207 (reasoningGraftCandidates query).
+    No ``request_reasoning_graft`` tool — Lane H is auto-triggered
+    by the cycle_tick when conferring produces a high-confidence
+    result. Workers trigger the underlying flow via ``confer_run``
+    (G2, already shipped)."""
+
+    def _err(msg: str) -> str:
+        return json.dumps({"error": msg})
+
+    def _reason(c) -> str:
+        try:
+            t = c.last_error_text()
+        except Exception:  # noqa: BLE001
+            return ""
+        return f" ({t})" if t else ""
+
+    @mcp.tool()
+    def lane_h_list(user_id: Optional[str] = None, limit: int = 20) -> str:
+        """List recent Lane H reasoning-graft-candidate docs.
+
+        Lane H docs are emitted automatically by devagentic's
+        cycle_tick when a confer-result clears the auto-trigger
+        confidence threshold (#174). Workers read them as
+        authoritative preamble for subsequent moves.
+
+        Args:
+            user_id: User scope. Omit to use the active hermes
+                profile's resolved id (the usual case).
+            limit: Cap on rows returned (default 20). Newest-first.
+
+        Returns: JSON ``{"count": N, "grafts": [...]}`` on success
+        or ``{"error": ...}``.
+        """
+        c = _resolve_lane_h_client()
+        if c is None:
+            return _err("devagentic-lane-h plugin not available "
+                        "(missing plugins/devagentic-lane-h/)")
+        rows = c.list_reasoning_grafts(
+            user_id=user_id, limit=max(0, int(limit)))
+        if rows is None:
+            return _err("lane_h_list failed" + _reason(c))
+        return json.dumps({"count": len(rows), "grafts": rows}, indent=2)
+
+    @mcp.tool()
+    def lane_h_fetch(graft_id: str) -> str:
+        """Fetch one Lane H reasoning-graft-candidate doc by id.
+
+        Validates the doc has the ``kind:reasoning-graft-candidate``
+        tag — returns an error if the id resolves to a different
+        kind of doc (which would indicate the worker passed the
+        wrong id).
+
+        Args:
+            graft_id: The doc id (from a prior ``lane_h_list``).
+
+        Returns: JSON ``{id, content, tags, source, ts}`` on
+        success or ``{"error": ...}``.
+        """
+        c = _resolve_lane_h_client()
+        if c is None:
+            return _err("devagentic-lane-h plugin not available")
+        if not graft_id:
+            return _err("graft_id is required")
+        doc = c.fetch_reasoning_graft(graft_id)
+        if doc is None:
+            return _err("lane_h_fetch failed" + _reason(c))
+        return json.dumps(doc, indent=2)
 

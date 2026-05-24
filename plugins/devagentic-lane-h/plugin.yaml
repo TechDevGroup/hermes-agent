@@ -1,0 +1,5 @@
+name: devagentic-lane-h
+version: 0.1.0
+description: "Worker read surface for Lane H reasoning-graft-candidate docs. Two MCP tools (lane_h_list + lane_h_fetch) wrapping devagentic's reasoningGraftCandidates query (devagentic#207) + searchDocs retrieval. Closes G4 of TechDevGroup/devagentic#203. Lane H auto-emission is driven by confer-loop / cycle_tick; this plugin only exposes the read side."
+author: TechDevGroup
+kind: standalone
