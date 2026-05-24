@@ -3061,6 +3061,17 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     """
     from tools.registry import registry
 
+    # hermes-agent#86 — read HERMES_TOOLS_SUBSET once per server registration
+    # so the per-tool check is an O(1) set membership test. Re-read per call
+    # (rather than module-level) because dynamic refresh
+    # (MCPServerTask.refresh_tools) re-invokes _register_server_tools and
+    # the env may have changed in operator-edit scenarios. Imported lazily
+    # so an isolated test load of tools/mcp_tool doesn't require a
+    # hermes_cli.tool_subset roundtrip if the test stubs out registration.
+    from hermes_cli.tool_subset import get_subset_allow as _get_subset_allow
+    from hermes_cli.tool_subset import is_tool_allowed as _is_tool_allowed
+    _subset_allow = _get_subset_allow()
+
     registered_names: List[str] = []
     toolset_name = f"mcp-{name}"
 
@@ -3102,6 +3113,18 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             )
             continue
 
+        # hermes-agent#86 — HERMES_TOOLS_SUBSET (#75) extended to MCP
+        # tools at registration. Filtering here (rather than downstream
+        # in agent_init.py) covers both initial discovery AND
+        # /reload-mcp paths (cli.py:9790 re-assigns agent.tools via
+        # get_tool_definitions without re-applying #75's filter).
+        if not _is_tool_allowed(tool_name_prefixed, _subset_allow):
+            logger.debug(
+                "HERMES_TOOLS_SUBSET excluded MCP tool '%s' from "
+                "server '%s'", tool_name_prefixed, name,
+            )
+            continue
+
         registry.register(
             name=tool_name_prefixed,
             toolset=toolset_name,
@@ -3136,6 +3159,14 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
                 "MCP server '%s': utility tool '%s' collides with built-in "
                 "tool in toolset '%s' — skipping to preserve built-in",
                 name, util_name, existing_toolset,
+            )
+            continue
+
+        # hermes-agent#86 — same subset filter for MCP utility tools.
+        if not _is_tool_allowed(util_name, _subset_allow):
+            logger.debug(
+                "HERMES_TOOLS_SUBSET excluded MCP utility tool '%s' "
+                "from server '%s'", util_name, name,
             )
             continue
 

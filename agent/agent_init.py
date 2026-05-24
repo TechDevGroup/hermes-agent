@@ -827,28 +827,33 @@ def init_agent(
     # what would otherwise be enabled). Bridges to #210 R1/R2 dynamic
     # per-turn routing — same hook point, classifier-driven later.
     #
+    # hermes-agent#86 — parsing moved to hermes_cli.tool_subset so the
+    # same allow-list also applies at MCP tool registration. Behavior
+    # unchanged for built-ins.
+    #
     # Empty / unset env preserves current behavior. Names not present
     # in the underlying registry are silently ignored (plugins can add/
     # remove tools at runtime; pre-validation would over-warn).
-    _subset_raw = (os.environ.get("HERMES_TOOLS_SUBSET") or "").strip()
-    if _subset_raw and agent.tools:
-        _wanted = {n.strip() for n in _subset_raw.split(",") if n.strip()}
-        if _wanted:
-            _before = len(agent.tools)
-            agent.tools = [
-                t for t in agent.tools
-                if (t.get("function") or {}).get("name") in _wanted
-            ]
-            if not agent.quiet_mode:
-                _kept = sorted({
-                    (t.get("function") or {}).get("name", "?")
-                    for t in agent.tools
-                })
-                print(
-                    f"🎯 HERMES_TOOLS_SUBSET narrowed tool surface: "
-                    f"{_before} → {len(agent.tools)} "
-                    f"({', '.join(_kept) if _kept else '<empty>'})"
-                )
+    from hermes_cli.tool_subset import get_subset_allow, is_tool_allowed
+    _subset_allow = get_subset_allow()
+    if _subset_allow is not None and agent.tools:
+        _before = len(agent.tools)
+        agent.tools = [
+            t for t in agent.tools
+            if is_tool_allowed(
+                (t.get("function") or {}).get("name", ""), _subset_allow
+            )
+        ]
+        if not agent.quiet_mode:
+            _kept = sorted({
+                (t.get("function") or {}).get("name", "?")
+                for t in agent.tools
+            })
+            print(
+                f"🎯 HERMES_TOOLS_SUBSET narrowed tool surface: "
+                f"{_before} → {len(agent.tools)} "
+                f"({', '.join(_kept) if _kept else '<empty>'})"
+            )
 
     # Show tool configuration and store valid tool names for validation
     agent.valid_tool_names = set()
