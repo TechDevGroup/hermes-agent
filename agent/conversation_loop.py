@@ -3671,6 +3671,69 @@ def run_conversation(
                         _has_structured
                         and agent._thinking_prefill_retries >= 2
                     )
+                    # hermes-agent#67: structural empty (finish_reason=stop +
+                    # no tool_calls + no prior tool turn + tools attached to
+                    # the request) means the model CHOSE to return nothing
+                    # despite being given tools. Retrying with the same input
+                    # produces the same empty across all 3 attempts (verified
+                    # live on polynomial-explorer). Short-circuit with a
+                    # synthetic recovery pair so the next iteration sends a
+                    # productive prompt instead of burning retries.
+                    _tools_attached = bool(
+                        getattr(agent, "tools", None)
+                    )
+                    _structural_empty = (
+                        _truly_empty
+                        and not _has_structured
+                        and finish_reason == "stop"
+                        and not _prior_was_tool
+                        and _tools_attached
+                        and not getattr(agent, "_tools_empty_terminal_handled", False)
+                    )
+                    if _structural_empty:
+                        agent._tools_empty_terminal_handled = True
+                        logger.warning(
+                            "Empty response (structural: stop + no tool_calls + "
+                            "tools attached) — model chose to return nothing. "
+                            "Surfacing synthetic recovery instead of retry "
+                            "(model=%s provider=%s response_id=%s)",
+                            agent.model,
+                            getattr(agent, "provider", "?"),
+                            getattr(assistant_message, "id", "?"),
+                        )
+                        agent._emit_status(
+                            "⚠️ Model returned empty despite tools attached — "
+                            "surfacing recovery prompt"
+                        )
+                        _synth_assistant = agent._build_assistant_message(
+                            assistant_message, finish_reason,
+                        )
+                        _synth_assistant["content"] = (
+                            "(empty — model returned no content despite "
+                            "tools being attached; finish_reason=stop)"
+                        )
+                        _synth_assistant["_empty_recovery_synthetic"] = True
+                        messages.append(_synth_assistant)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Your previous response was empty — the model "
+                                "chose to return no content despite the MCP "
+                                "tools being attached (finish_reason=stop, "
+                                "tool_calls=0). This is a structural failure: "
+                                "retrying with the same input will produce the "
+                                "same empty. Try ONE of: (a) rephrase the "
+                                "request so the next tool to call is "
+                                "unambiguous, (b) explicitly invoke a specific "
+                                "tool by name, or (c) proceed with text only "
+                                "(do not invoke tools this turn)."
+                            ),
+                            "_empty_recovery_synthetic": True,
+                        })
+                        agent._session_messages = messages
+                        agent._save_session_log(messages)
+                        continue
+
                     if _truly_empty and (not _has_structured or _prefill_exhausted) and agent._empty_content_retries < 3:
                         agent._empty_content_retries += 1
                         # hermes-agent#67 diagnostics: enrich the empty-response
