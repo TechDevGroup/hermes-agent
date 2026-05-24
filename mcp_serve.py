@@ -1734,3 +1734,32 @@ def _register_lane_h_tools(mcp: "FastMCP") -> None:
             return _err("lane_h_fetch failed" + _reason(c))
         return json.dumps(doc, indent=2)
 
+    @mcp.tool()
+    def grafted_context_fetch(graft_id: str,
+                              user_id: Optional[str] = None) -> str:
+        """Fetch one kind:grafted-context doc by id, scoped to user_id
+        (hermes-agent#71).
+
+        Use this when the vertical preamble index showed you a graft
+        you want to read in full. The preamble (post-#71 G1) renders
+        only ``[graft_id | source | path | 1-line abstract]`` per
+        graft to keep context cost bounded; fetch on demand.
+
+        Args:
+            graft_id: The doc id from the preamble index.
+            user_id: Omit to use the active hermes profile (typical).
+
+        Returns: JSON ``{id, userId, source, ref, sha, path, content,
+        ts}`` on success, or ``{"error": ...}``.
+        """
+        c = _resolve_lane_h_client()
+        if c is None:
+            return _err("devagentic-lane-h plugin not available")
+        if not graft_id:
+            return _err("graft_id is required")
+        doc = c.fetch_grafted_context(
+            graft_id=graft_id, user_id=user_id)
+        if doc is None:
+            return _err("grafted_context_fetch failed" + _reason(c))
+        return json.dumps(doc, indent=2)
+
