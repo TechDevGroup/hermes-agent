@@ -820,7 +820,36 @@ def init_agent(
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
     )
-    
+
+    # hermes-agent#74 — HERMES_TOOLS_SUBSET narrows the tool surface to
+    # an operator-supplied allow-list. Composes with --enable-toolset /
+    # --disable-toolset (toolset filter runs first; this further narrows
+    # what would otherwise be enabled). Bridges to #210 R1/R2 dynamic
+    # per-turn routing — same hook point, classifier-driven later.
+    #
+    # Empty / unset env preserves current behavior. Names not present
+    # in the underlying registry are silently ignored (plugins can add/
+    # remove tools at runtime; pre-validation would over-warn).
+    _subset_raw = (os.environ.get("HERMES_TOOLS_SUBSET") or "").strip()
+    if _subset_raw and agent.tools:
+        _wanted = {n.strip() for n in _subset_raw.split(",") if n.strip()}
+        if _wanted:
+            _before = len(agent.tools)
+            agent.tools = [
+                t for t in agent.tools
+                if (t.get("function") or {}).get("name") in _wanted
+            ]
+            if not agent.quiet_mode:
+                _kept = sorted({
+                    (t.get("function") or {}).get("name", "?")
+                    for t in agent.tools
+                })
+                print(
+                    f"🎯 HERMES_TOOLS_SUBSET narrowed tool surface: "
+                    f"{_before} → {len(agent.tools)} "
+                    f"({', '.join(_kept) if _kept else '<empty>'})"
+                )
+
     # Show tool configuration and store valid tool names for validation
     agent.valid_tool_names = set()
     if agent.tools:
