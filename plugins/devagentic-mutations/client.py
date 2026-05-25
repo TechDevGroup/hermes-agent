@@ -387,6 +387,50 @@ def patch_artifact(
     return result
 
 
+_FETCH_URL_MUTATION = """mutation($u:String!,$c:String){
+    fetchUrl(url:$u, ctxId:$c)
+}"""
+
+
+def fetch_url(
+    url: str,
+    ctx_id: Optional[str] = None,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Optional[dict]:
+    """Wrap devagentic's ``fetchUrl`` mutation. Performs a graph-
+    resident HTTP fetch; subject to devagentic-side constraints
+    (localhost-only URLs, 16K body cap, mock-shape lookup +
+    auto-capture gated by ``DEVAGENTIC_MOCK_LOOKUP`` /
+    ``DEVAGENTIC_MOCK_CAPTURE`` env).
+
+    Args:
+        url: HTTP URL — devagentic enforces ``http://localhost`` /
+            ``http://127.0.0.1`` prefix; other URLs are rejected.
+        ctx_id: Optional ctx id (threaded into the resulting
+            ``tool_call`` node's refs).
+
+    Returns ``{url, status_code, content_type, body, truncated,
+    mocked, ack, ...}`` on success or ``None`` on failure (see
+    ``last_error_text()``).
+    """
+    if not url:
+        _record_error("url is required")
+        return None
+    data = _post_graphql(
+        _FETCH_URL_MUTATION,
+        {"u": url, "c": ctx_id or None},
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    result = data.get("fetchUrl")
+    if not isinstance(result, dict):
+        _record_error("fetchUrl returned non-dict")
+        return None
+    return result
+
+
 _RUN_CONFER_LOOP_MUTATION = """mutation($u:String!,$c:String!){
     runConferLoop(userId:$u, candidateId:$c)
 }"""
