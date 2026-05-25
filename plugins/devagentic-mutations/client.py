@@ -186,6 +186,59 @@ def query_silo(
     return reply
 
 
+_ASSERT_OUTPUT_MUTATION = """mutation($cid:String!,$ef:String!,$ep:String){
+    assertOutput(callId:$cid, expectation:{fragment:$ef, predicate:$ep}){
+        id ts callId passed violations
+    }
+}"""
+
+
+def assert_output(
+    call_id: str,
+    fragment: str,
+    predicate: Optional[str] = None,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Optional[dict]:
+    """Wrap devagentic's ``assertOutput`` mutation. Evaluates an
+    ``ExpectationInput {fragment, predicate?}`` against a previously
+    emitted ``tool_call`` (referenced by ``call_id``) and writes a
+    ``Verdict`` node.
+
+    Args:
+        call_id: The ``tool_call`` node id to vet.
+        fragment: A path into the tool_call subject (e.g.,
+            ``"content"``, ``"args.path"``). Required.
+        predicate: Optional predicate string. When omitted /
+            empty / null-stringly, the devagentic-side
+            ``_stiffen_predicate`` substitutes a tool-specific
+            floor (and emits a ``kind:predicate-coerced``
+            telemetry doc).
+
+    Returns ``{id, ts, callId, passed, violations: [...]}`` on
+    success or ``None`` on failure (see ``last_error_text()``).
+    """
+    if not call_id or not fragment:
+        _record_error("call_id and fragment are required")
+        return None
+    data = _post_graphql(
+        _ASSERT_OUTPUT_MUTATION,
+        {
+            "cid": call_id,
+            "ef": fragment,
+            "ep": predicate if predicate not in (None, "") else None,
+        },
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    verdict = data.get("assertOutput")
+    if not isinstance(verdict, dict):
+        _record_error("assertOutput returned non-dict")
+        return None
+    return verdict
+
+
 _RUN_CONFER_LOOP_MUTATION = """mutation($u:String!,$c:String!){
     runConferLoop(userId:$u, candidateId:$c)
 }"""

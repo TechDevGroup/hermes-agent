@@ -34,6 +34,7 @@ _REQUIRED_DEVAGENTIC_TOOLS = {
     # G2 — devagentic-mutations
     "silo_query",
     "confer_run",
+    "assert_output",  # G2b (#60)
     # G3 — hermes-github
     "file_issue",
     # G4 — devagentic-lane-h
