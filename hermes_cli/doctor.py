@@ -665,6 +665,68 @@ def _check_acp_installation(issues: list[str]) -> None:
         )
 
 
+def _check_provider_env_vars() -> None:
+    """Validate ``HERMES_DEFAULT_PROVIDER`` + ``HERMES_INFERENCE_PROVIDER``
+    env vars against the known-provider registry. Silent when neither
+    is set — most operators don't override the provider via env and
+    don't need a row each run. Surfaces:
+
+      * ``check_ok`` when set + matches a known provider name (so
+        operators using container deployments can see the pin is
+        live + correct);
+      * ``check_warn`` when set + doesn't match (surfaces typos like
+        ``devagentic-locol`` at boot instead of letting the worker
+        silently fall through to ``auto``).
+
+    Both env vars share the same provider-name vocabulary; this
+    probe handles each independently so a partial mismatch is
+    surfaced precisely.
+    """
+    default_env = os.environ.get("HERMES_DEFAULT_PROVIDER", "").strip()
+    inference_env = os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip()
+    if not default_env and not inference_env:
+        return
+
+    try:
+        from providers import list_providers as _list_providers
+        plugin_names = {p.name.lower() for p in _list_providers()}
+    except Exception:  # noqa: BLE001
+        plugin_names = set()
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        builtin_names = {n.lower() for n in PROVIDER_REGISTRY.keys()}
+    except Exception:  # noqa: BLE001
+        builtin_names = set()
+
+    known = (plugin_names | builtin_names
+             | {"openrouter", "custom", "auto", "anthropic", "openai"})
+
+    _section("Provider env vars")
+
+    def _check(var_name: str, raw_value: str, role: str) -> None:
+        norm = raw_value.lower()
+        if norm in known:
+            check_ok(
+                f"{var_name}={raw_value!r}",
+                f"({role}; matches a known provider)",
+            )
+            return
+        # Show a sample of known names to help the operator spot the
+        # typo. Sort + cap to keep the line readable.
+        sample = ", ".join(sorted(known)[:8])
+        check_warn(
+            f"{var_name}={raw_value!r} doesn't match a known provider",
+            f"({role}; known providers include: {sample}…)",
+        )
+
+    if default_env:
+        _check("HERMES_DEFAULT_PROVIDER", default_env,
+               "deployment-priority — beats persisted config")
+    if inference_env:
+        _check("HERMES_INFERENCE_PROVIDER", inference_env,
+               "legacy env fallback — below persisted config")
+
+
 _APIKEY_PROVIDERS_CACHE: list | None = None
 
 
@@ -2384,6 +2446,7 @@ def run_doctor(args):
     _check_cron_scheduler()
     _check_gateway_runtime()
     _check_acp_installation(issues)
+    _check_provider_env_vars()
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
