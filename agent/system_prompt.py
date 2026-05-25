@@ -18,6 +18,27 @@ Three tiers are joined with ``\\n\\n``:
 * ``volatile`` — memory snapshot, USER.md profile, external memory
   provider block, timestamp/session/model/provider line.
 
+## Per-intent narrowing (issue #97 / #89 Direction A)
+
+When ``HERMES_INTENT_OVERRIDE`` is set to one of the 6 intent keys
+matched by ``devagentic#240``'s heuristic classifier
+(``code``/``confer``/``planning``/``exploration``/``refinement``/
+``generic``), the ``stable`` layer is narrowed per the intent:
+
+* ``code`` — operator declares this worker is for tool-call-heavy
+  coding traffic. Narrowing skips SOUL.md (falls back to the short
+  ``DEFAULT_AGENT_IDENTITY``), ``HERMES_AGENT_HELP_GUIDANCE``,
+  ``SKILLS_GUIDANCE``, ``KANBAN_GUIDANCE``, ``SESSION_SEARCH_GUIDANCE``
+  + the full skills_prompt block. Keeps tool-use-enforcement
+  + per-model operational guidance + env/platform hints + the
+  ``MEMORY_GUIDANCE`` block (small + sometimes useful).
+* other intents — recognized as valid but no narrowing in v1
+  (keeps the door open for per-intent shape later).
+
+Operator opts in per worker via env var; static for the deployment.
+Dynamic per-turn classification is a follow-up — see issue #97 for
+the A1/A2 composition options.
+
 Pure helpers that read the agent's state.  AIAgent keeps thin forwarders.
 """
 
@@ -40,6 +61,32 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
 )
+
+
+# Issue #97 / #89 Direction A.
+# Matches devagentic#240's intent_classifier vocabulary so the same
+# operator who sets the upstream classifier intent can pin hermes-
+# side narrowing without learning a second vocabulary.
+INTENT_OVERRIDE_ENV = "HERMES_INTENT_OVERRIDE"
+INTENT_KEYS = frozenset({
+    "code", "confer", "planning", "exploration", "refinement", "generic",
+})
+
+
+def _resolve_intent_override() -> Optional[str]:
+    """Read ``HERMES_INTENT_OVERRIDE`` from env. Returns the
+    normalized intent key when set + valid, else ``None``.
+
+    Invalid values (typos / unknown intents) return None so the
+    prompt assembly falls back to the unchanged default behavior —
+    doctor's ``_check_intent_override_env`` probe surfaces the
+    mismatch separately so the operator sees the typo without the
+    runtime path silently misbehaving.
+    """
+    raw = os.environ.get(INTENT_OVERRIDE_ENV, "").strip().lower()
+    if not raw:
+        return None
+    return raw if raw in INTENT_KEYS else None
 
 
 def _ra():
@@ -80,14 +127,24 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # we resolve through ``_ra()`` to honor those patches.
     _r = _ra()
 
+    # Resolve per-intent narrowing flag (issue #97 / #89 Direction A).
+    # When the operator pins HERMES_INTENT_OVERRIDE=code, drop sections
+    # that contribute to the prompt-saturation envelope on mid-tier
+    # coding models. Read once per call (rebuild after compression
+    # re-reads, so env changes between sessions take effect).
+    _intent_override = _resolve_intent_override()
+    _narrow_for_code = (_intent_override == "code")
+
     # ── Stable tier ────────────────────────────────────────────────
     stable_parts: List[str] = []
 
     # Try SOUL.md as primary identity unless the caller explicitly skipped it.
     # Some execution modes (cron) still want HERMES_HOME persona while keeping
     # cwd project instructions disabled.
+    # #97: when narrowing for code intent, skip SOUL.md entirely and
+    # fall through to DEFAULT_AGENT_IDENTITY (shorter identity floor).
     _soul_loaded = False
-    if agent.load_soul_identity or not agent.skip_context_files:
+    if (not _narrow_for_code) and (agent.load_soul_identity or not agent.skip_context_files):
         _soul_content = _r.load_soul_md()
         if _soul_content:
             stable_parts.append(_soul_content)
@@ -98,26 +155,32 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    # #97: skipped under code-intent narrowing (off-topic for tool-call traffic).
+    if not _narrow_for_code:
+        stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
 
-    # Tool-aware behavioral guidance: only inject when the tools are loaded
+    # Tool-aware behavioral guidance: only inject when the tools are loaded.
+    # #97 narrowing for code intent: keep MEMORY_GUIDANCE (small +
+    # sometimes useful), drop SESSION_SEARCH / SKILLS / KANBAN
+    # (off-topic for code-only workers).
     tool_guidance = []
     if "memory" in agent.valid_tool_names:
         tool_guidance.append(MEMORY_GUIDANCE)
-    if "session_search" in agent.valid_tool_names:
+    if "session_search" in agent.valid_tool_names and not _narrow_for_code:
         tool_guidance.append(SESSION_SEARCH_GUIDANCE)
-    if "skill_manage" in agent.valid_tool_names:
+    if "skill_manage" in agent.valid_tool_names and not _narrow_for_code:
         tool_guidance.append(SKILLS_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
     # this block. Resolved once at __init__ (see _kanban_worker_guidance).
-    _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
-    if _kanban_guidance:
-        tool_guidance.append(_kanban_guidance)
-    elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
-        # Fallback for code paths that bypass agent_init (rare).
-        tool_guidance.append(KANBAN_GUIDANCE)
+    if not _narrow_for_code:
+        _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
+        if _kanban_guidance:
+            tool_guidance.append(_kanban_guidance)
+        elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
+            # Fallback for code paths that bypass agent_init (rare).
+            tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
 
@@ -166,8 +229,11 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
                 stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
 
+    # #97: the skills_prompt block is the single biggest contributor
+    # to prompt mass when many skills are loaded. Skipped under code-
+    # intent narrowing.
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
-    if has_skills_tools:
+    if has_skills_tools and not _narrow_for_code:
         avail_toolsets = {
             toolset
             for toolset in (
