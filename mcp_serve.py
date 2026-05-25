@@ -872,11 +872,40 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     # strings — no MCP tool ever raises.
     # ---------------------------------------------------------------------
 
-    _register_canvas_tools(mcp)
-    _register_docs_tools(mcp)
-    _register_devagentic_mutation_tools(mcp)
-    _register_github_tools(mcp)
-    _register_lane_h_tools(mcp)
+    # Each registrar is wrapped defensively: if one fails (e.g., a
+    # plugin module is malformed in a deployed wheel), the others
+    # still register and the failure surfaces in stderr instead of
+    # crashing the whole server. Per issue #88.
+    _devagentic_registrars = (
+        ("canvas", _register_canvas_tools),
+        ("docs", _register_docs_tools),
+        ("devagentic-mutations", _register_devagentic_mutation_tools),
+        ("github", _register_github_tools),
+        ("lane-h", _register_lane_h_tools),
+    )
+    for _label, _registrar in _devagentic_registrars:
+        try:
+            _registrar(mcp)
+        except Exception as exc:
+            logger.warning(
+                "MCP server: registrar %r failed: %s — peers still register",
+                _label, exc,
+            )
+
+    # Boot-line summary so deployed-container subprocess stderr exposes
+    # exactly which tools are present in the loaded mcp_serve build.
+    # Without this, operators have to truncate-enumerate (see #88 false
+    # alarm). Per issue #88.
+    try:
+        _tool_names = sorted(
+            getattr(t, "name", "") for t in mcp._tool_manager.list_tools()
+        )
+        logger.info(
+            "MCP server boot: registered %d tools: %s",
+            len(_tool_names), _tool_names,
+        )
+    except Exception as exc:
+        logger.debug("MCP server boot: tool enumeration failed: %s", exc)
 
     return mcp
 
