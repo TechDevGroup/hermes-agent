@@ -727,6 +727,50 @@ def _check_provider_env_vars() -> None:
                "legacy env fallback — below persisted config")
 
 
+def _check_intent_override_env() -> None:
+    """Surface ``HERMES_INTENT_OVERRIDE`` (#97 / #89 Direction A) when
+    set. Silent when unset (silent-when-irrelevant pattern). When set:
+
+      * ``check_ok`` when the value matches one of the 6 known intent
+        keys (``code`` / ``confer`` / ``planning`` / ``exploration``
+        / ``refinement`` / ``generic``);
+      * ``check_warn`` when the value doesn't match (typo) — runtime
+        treats unknown values as 'no override' (falls back to the
+        default un-narrowed prompt), so the warn surfaces the typo
+        at boot instead of letting it silently no-op.
+    """
+    try:
+        from agent.system_prompt import (
+            INTENT_OVERRIDE_ENV as _ENV,
+            INTENT_KEYS as _KEYS,
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+    raw = os.environ.get(_ENV, "").strip()
+    if not raw:
+        return
+
+    _section("Intent override (#97)")
+    norm = raw.lower()
+    if norm in _KEYS:
+        narrowing_active = (
+            "narrows system prompt for code-heavy traffic"
+            if norm == "code" else "valid; no narrowing in v1"
+        )
+        check_ok(
+            f"{_ENV}={raw!r}",
+            f"({narrowing_active})",
+        )
+    else:
+        sample = ", ".join(sorted(_KEYS))
+        check_warn(
+            f"{_ENV}={raw!r} is not a known intent key",
+            f"(valid: {sample}; runtime falls back to default prompt "
+            "when unknown)",
+        )
+
+
 def _check_tools_subset_env() -> None:
     """Surface the active ``HERMES_TOOLS_SUBSET`` (#75/#87) when set.
 
@@ -2499,6 +2543,7 @@ def run_doctor(args):
     _check_acp_installation(issues)
     _check_provider_env_vars()
     _check_tools_subset_env()
+    _check_intent_override_env()
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
