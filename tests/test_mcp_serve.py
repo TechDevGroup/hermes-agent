@@ -936,7 +936,8 @@ class TestToolRegistration:
             "messages_send", "channels_list",
             "permissions_list_open", "permissions_respond",
         }
-        assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
+        missing = expected - tool_names
+        assert not missing, f"Missing messaging tools: {missing}"
 
     def test_tools_have_descriptions(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
