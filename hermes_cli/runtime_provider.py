@@ -355,17 +355,38 @@ def _resolve_runtime_from_pool_entry(
 
 
 def resolve_requested_provider(requested: Optional[str] = None) -> str:
-    """Resolve provider request from explicit arg, config, then env."""
+    """Resolve provider request from explicit arg, env override, config,
+    then legacy env fallback.
+
+    Priority (closes #70):
+      1. ``requested`` argument (explicit CLI ``--provider`` flag).
+      2. ``HERMES_DEFAULT_PROVIDER`` env var (intended for container /
+         deployment scenarios where env should win over any persisted
+         config). Opt-in by setting; absent value falls through.
+      3. ``model.provider`` in the persisted config.yaml.
+      4. ``HERMES_INFERENCE_PROVIDER`` legacy env fallback (kept below
+         config so a stale shell export doesn't shadow what the user
+         last saved interactively).
+      5. ``"auto"`` — let downstream auto-detect pick.
+    """
     if requested and requested.strip():
         return requested.strip().lower()
+
+    # Deployment-priority env knob — beats persisted config so a
+    # container can pin the provider via env without rewriting the
+    # baked-in config.yaml.
+    default_env = os.getenv("HERMES_DEFAULT_PROVIDER", "").strip().lower()
+    if default_env:
+        return default_env
 
     model_cfg = _get_model_config()
     cfg_provider = model_cfg.get("provider")
     if isinstance(cfg_provider, str) and cfg_provider.strip():
         return cfg_provider.strip().lower()
 
-    # Prefer the persisted config selection over any stale shell/.env
-    # provider override so chat uses the endpoint the user last saved.
+    # Legacy fallback. Kept below the persisted config so a stale
+    # shell/.env provider override doesn't shadow the endpoint the
+    # user last saved interactively.
     env_provider = os.getenv("HERMES_INFERENCE_PROVIDER", "").strip().lower()
     if env_provider:
         return env_provider
