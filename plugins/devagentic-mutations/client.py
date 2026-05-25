@@ -239,6 +239,154 @@ def assert_output(
     return verdict
 
 
+_READ_ARTIFACT_MUTATION = """mutation($p:String!,$c:String,$s:String){
+    readArtifact(path:$p, ctxId:$c, strategy:$s)
+}"""
+
+
+def read_artifact(
+    path: str,
+    ctx_id: Optional[str] = None,
+    strategy: Optional[str] = "raw",
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Optional[dict]:
+    """Wrap devagentic's ``readArtifact`` mutation. Reads a file from
+    the active workspace (filesystem / ssh-remote / sandbox-backend
+    per ``current_workspace()``).
+
+    Args:
+        path: File path to read. Subject to devagentic-side workspace
+            scoping + (when non-dev-scoped) the absolute-path
+            whitelist.
+        ctx_id: Optional ctx id (when supplied + dev-scoped, unlocks
+            the 256K read cap; otherwise capped at 32K).
+        strategy: Read strategy — ``"raw"`` (default), or one of the
+            strategies surfaced by ``readart_strategies``.
+
+    Returns ``{id, path, content, size, ack, truncated, strategy,
+    ...}`` on success or ``None`` on failure (see
+    ``last_error_text()``).
+    """
+    if not path:
+        _record_error("path is required")
+        return None
+    data = _post_graphql(
+        _READ_ARTIFACT_MUTATION,
+        {"p": path, "c": ctx_id or None,
+         "s": (strategy or "raw") or None},
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    result = data.get("readArtifact")
+    if not isinstance(result, dict):
+        _record_error("readArtifact returned non-dict")
+        return None
+    return result
+
+
+_PREVIEW_PATCH_QUERY = """query($p:String!,$f:String!,$r:String!){
+    previewPatch(path:$p, find:$f, replace:$r)
+}"""
+
+
+def preview_patch(
+    path: str,
+    find: str,
+    replace: str,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Optional[dict]:
+    """Wrap devagentic's ``previewPatch`` query field. Computes the
+    diff between the current file and the patched version + returns
+    a ``confirm_token`` that ``patch_artifact`` requires (outside
+    dev-scoped contexts).
+
+    Args:
+        path: File path to preview the patch against.
+        find: Exact text to locate (single match — first occurrence
+            replaced; mirrors ``str.replace(find, replace, 1)``
+            semantics in devagentic).
+        replace: Replacement text.
+
+    Returns ``{confirm_token, diff, windows, syntax_check, ...}``
+    on success — or ``{"error": ...}`` shape when the resolver
+    surfaced an in-band error (e.g., find-string missing). On
+    transport failure returns ``None`` (see ``last_error_text()``).
+    """
+    if not path or find is None:
+        _record_error("path and find are required")
+        return None
+    data = _post_graphql(
+        _PREVIEW_PATCH_QUERY,
+        {"p": path, "f": find, "r": replace if replace is not None else ""},
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    result = data.get("previewPatch")
+    if not isinstance(result, dict):
+        _record_error("previewPatch returned non-dict")
+        return None
+    return result
+
+
+_PATCH_ARTIFACT_MUTATION = """mutation(
+    $p:String!,$f:String!,$r:String!,$t:String,$c:String){
+    patchArtifact(path:$p, find:$f, replace:$r,
+                  confirmToken:$t, ctxId:$c)
+}"""
+
+
+def patch_artifact(
+    path: str,
+    find: str,
+    replace: str,
+    confirm_token: Optional[str] = None,
+    ctx_id: Optional[str] = None,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Optional[dict]:
+    """Wrap devagentic's ``patchArtifact`` mutation. Applies a
+    find/replace edit in place. Requires ``confirm_token`` from a
+    prior ``preview_patch`` call unless ``ctx_id`` is dev-scoped or
+    a sandbox-backend is active.
+
+    Args:
+        path: File path to patch.
+        find: Exact text to locate (single replacement).
+        replace: Replacement text.
+        confirm_token: Token from a prior ``preview_patch`` call;
+            required outside dev-scoped + sandbox-backend contexts.
+        ctx_id: Optional ctx id (when dev-scoped, bypasses the
+            token requirement).
+
+    Returns ``{id, path, written, replacements, ack, ...}`` on
+    success or ``None`` on failure (see ``last_error_text()`` —
+    typically ``"confirm_token does not match"`` or
+    ``"file not found"``).
+    """
+    if not path or find is None:
+        _record_error("path and find are required")
+        return None
+    data = _post_graphql(
+        _PATCH_ARTIFACT_MUTATION,
+        {"p": path, "f": find,
+         "r": replace if replace is not None else "",
+         "t": confirm_token or None,
+         "c": ctx_id or None},
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    result = data.get("patchArtifact")
+    if not isinstance(result, dict):
+        _record_error("patchArtifact returned non-dict")
+        return None
+    return result
+
+
 _RUN_CONFER_LOOP_MUTATION = """mutation($u:String!,$c:String!){
     runConferLoop(userId:$u, candidateId:$c)
 }"""
