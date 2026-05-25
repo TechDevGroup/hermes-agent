@@ -173,3 +173,107 @@ def test_run_confer_loop_returns_null_data_returns_none(client_mod, monkeypatch)
 def test_run_confer_loop_no_user_id_returns_none(client_mod, monkeypatch):
     monkeypatch.setattr(client_mod, "resolve_user_id", lambda: None)
     assert client_mod.run_confer_loop("uid", "cand") is None
+
+
+# ─── assert_output (G2b, #60) ─────────────────────────────────
+
+def test_assert_output_empty_args_return_none(client_mod):
+    """Both call_id and fragment are required — empty either
+    short-circuits before any network call."""
+    assert client_mod.assert_output("", "content") is None
+    assert client_mod.assert_output("call-1", "") is None
+
+
+def test_assert_output_no_user_id_returns_none(client_mod, monkeypatch):
+    """The transport short-circuits when X-User-Id can't be resolved
+    (same fail-soft contract as the other mutations)."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: None)
+    assert client_mod.assert_output("call-1", "content") is None
+
+
+def test_assert_output_happy_path(client_mod, monkeypatch):
+    """Verdict round-trips through the GraphQL response unchanged."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    verdict = {
+        "id": "verdict-9",
+        "ts": "2026-05-25T01:50:00Z",
+        "callId": "call-7",
+        "passed": True,
+        "violations": [],
+    }
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("assertOutput", verdict))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    out = client_mod.assert_output(
+        "call-7", "content", predicate="len > 0")
+    assert out is not None
+    assert out["id"] == "verdict-9"
+    assert out["passed"] is True
+    # Variables threaded into ExpectationInput shape.
+    assert captured["body"]["variables"]["cid"] == "call-7"
+    assert captured["body"]["variables"]["ef"] == "content"
+    assert captured["body"]["variables"]["ep"] == "len > 0"
+
+
+def test_assert_output_predicate_omitted_sends_null(client_mod, monkeypatch):
+    """Devagentic-side _stiffen_predicate substitutes a tool floor
+    when the predicate is None — verify the client passes None
+    (not the literal string "None" or empty string) so the resolver
+    sees an absent predicate."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    verdict = {"id": "v-1", "ts": "t", "callId": "c-1",
+               "passed": False, "violations": ["coerced floor"]}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("assertOutput", verdict))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    out = client_mod.assert_output("c-1", "content")
+    assert out is not None
+    assert captured["body"]["variables"]["ep"] is None
+
+
+def test_assert_output_empty_predicate_sends_null(client_mod, monkeypatch):
+    """An empty-string predicate is equivalent to omission — same
+    transport behavior so the devagentic resolver's stiffener fires."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    verdict = {"id": "v-2", "ts": "t", "callId": "c-2",
+               "passed": True, "violations": []}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("assertOutput", verdict))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    client_mod.assert_output("c-2", "content", predicate="")
+    assert captured["body"]["variables"]["ep"] is None
+
+
+def test_assert_output_returns_null_data_returns_none(
+        client_mod, monkeypatch):
+    """Devagentic-side resolver raises ValueError for unknown call_id;
+    GraphQL wraps that as ``errors`` — _post_graphql returns None
+    and last_error_text() carries the surface."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    payload = json.dumps({"data": {"assertOutput": None}}).encode("utf-8")
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(payload))
+    assert client_mod.assert_output("missing-call", "content") is None
+
+
+def test_assert_output_non_dict_response_returns_none(
+        client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    payload = json.dumps(
+        {"data": {"assertOutput": "not-a-dict"}}).encode("utf-8")
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(payload))
+    assert client_mod.assert_output("c", "f") is None
+    assert "non-dict" in (client_mod.last_error_text() or "")

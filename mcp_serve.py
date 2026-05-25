@@ -1483,13 +1483,14 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
     Tools registered:
       * ``silo_query`` — wraps devagentic's ``querySilo`` GraphQL field
       * ``confer_run`` — wraps devagentic's ``runConferLoop`` mutation
+      * ``assert_output`` — wraps devagentic's ``assertOutput`` mutation
+        (closes hermes-agent#60 / G2b)
 
     Not registered here (already in ``_register_docs_tools``):
       ``doc_write`` (writeDoc), ``fork_*`` (forkContext family).
 
     Follow-up tools tracked under #56:
-      ``assert_output``, ``patch_artifact``, ``read_artifact``,
-      ``fetch_url``.
+      ``patch_artifact``, ``read_artifact``, ``fetch_url``.
     """
 
     def _err(msg: str) -> str:
@@ -1567,6 +1568,43 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
         if rollup is None:
             return _err("confer_run failed" + _reason(c))
         return json.dumps(rollup, indent=2)
+
+    @mcp.tool()
+    def assert_output(call_id: str, fragment: str,
+                      predicate: Optional[str] = None) -> str:
+        """Vet a prior tool_call against a predicate (closes #60).
+
+        Wraps devagentic's ``assertOutput`` mutation. Looks up the
+        ``tool_call`` node by id, builds a subject from its body,
+        and evaluates ``ExpectationInput {fragment, predicate?}``
+        against it. Devagentic writes a ``Verdict`` node + (if the
+        predicate was None/empty) a ``kind:predicate-coerced``
+        telemetry doc.
+
+        Args:
+            call_id: The ``tool_call`` node id to vet (typically
+                captured from a prior tool invocation's audit
+                trail).
+            fragment: A subject path into the tool_call body
+                (e.g., ``"content"``, ``"args.path"``). Required.
+            predicate: Optional predicate string. When omitted /
+                empty, the devagentic-side ``_stiffen_predicate``
+                substitutes a tool-specific floor (so the verdict
+                is meaningful even on no-predicate emissions).
+
+        Returns: JSON ``{id, ts, callId, passed, violations: [...]}``
+        on success, or ``{"error": ...}``.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available")
+        if not call_id or not fragment:
+            return _err("call_id and fragment are required")
+        verdict = c.assert_output(
+            call_id=call_id, fragment=fragment, predicate=predicate)
+        if verdict is None:
+            return _err("assert_output failed" + _reason(c))
+        return json.dumps(verdict, indent=2)
 
 
 def _resolve_github_client():
