@@ -1492,12 +1492,13 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
         patch_artifact: supplies the confirm_token)
       * ``patch_artifact`` — wraps devagentic's ``patchArtifact``
         mutation (closes hermes-agent#61 / G2c part 3)
+      * ``fetch_url`` — wraps devagentic's ``fetchUrl`` mutation
+        (closes hermes-agent#62 / G2d)
 
     Not registered here (already in ``_register_docs_tools``):
       ``doc_write`` (writeDoc), ``fork_*`` (forkContext family).
 
-    Follow-up tools tracked under #56:
-      ``fetch_url`` (#62 / G2d).
+    With G2d shipped, the #56 G2 roadmap is fully closed.
     """
 
     def _err(msg: str) -> str:
@@ -1716,6 +1717,37 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
             confirm_token=confirm_token, ctx_id=ctx_id)
         if result is None:
             return _err("patch_artifact failed" + _reason(c))
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def fetch_url(url: str, ctx_id: Optional[str] = None) -> str:
+        """Fetch a localhost URL via the devagentic graph (#62 G2d).
+
+        Wraps devagentic's ``fetchUrl`` mutation. Devagentic-side
+        constraints: localhost-only (``http://localhost`` or
+        ``http://127.0.0.1``); 16K body cap; mock-shape lookup +
+        auto-capture gated by ``DEVAGENTIC_MOCK_LOOKUP`` /
+        ``DEVAGENTIC_MOCK_CAPTURE`` env. Emits a ``tool_call`` node
+        on success.
+
+        Args:
+            url: The localhost URL to fetch. Non-localhost URLs are
+                rejected at the resolver with a ``ValueError``.
+            ctx_id: Optional ctx id (threaded into the resulting
+                ``tool_call`` node's refs).
+
+        Returns: JSON ``{url, status_code, content_type, body,
+        truncated, mocked, ack, ...}`` on success, or
+        ``{"error": ...}``.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available")
+        if not url:
+            return _err("url is required")
+        result = c.fetch_url(url=url, ctx_id=ctx_id)
+        if result is None:
+            return _err("fetch_url failed" + _reason(c))
         return json.dumps(result, indent=2)
 
 

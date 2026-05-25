@@ -38,6 +38,7 @@ _REQUIRED_DEVAGENTIC_TOOLS = {
     "read_artifact",  # G2c (#61) — companion read tool
     "preview_patch",  # G2c (#61) — supplies confirm_token
     "patch_artifact",  # G2c (#61) — in-place find/replace
+    "fetch_url",  # G2d (#62) — localhost-only HTTP fetch
     # G3 — hermes-github
     "file_issue",
     # G4 — devagentic-lane-h

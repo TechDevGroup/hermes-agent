@@ -425,3 +425,72 @@ def test_patch_artifact_non_dict_returns_none(client_mod, monkeypatch):
         lambda r, timeout=None: _FakeResp(payload))
     assert client_mod.patch_artifact("/p", "o", "n") is None
     assert "non-dict" in (client_mod.last_error_text() or "")
+
+
+# ─── fetch_url (G2d, #62) ─────────────────────────────────────
+
+def test_fetch_url_empty_url_returns_none(client_mod):
+    assert client_mod.fetch_url("") is None
+
+
+def test_fetch_url_happy_path(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    result = {"url": "http://localhost:8080/p",
+              "status_code": 200, "content_type": "text/plain",
+              "body": "ok\n", "truncated": False, "mocked": False,
+              "ack": "tc-1"}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("fetchUrl", result))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    out = client_mod.fetch_url("http://localhost:8080/p", ctx_id="ctx-3")
+    assert out is not None
+    assert out["status_code"] == 200
+    assert captured["body"]["variables"]["u"] == "http://localhost:8080/p"
+    assert captured["body"]["variables"]["c"] == "ctx-3"
+
+
+def test_fetch_url_no_ctx_id_sends_null(client_mod, monkeypatch):
+    """ctx_id is optional; omitted passes null (not the string 'None')
+    so the resolver's null-default fires."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    result = {"url": "http://localhost/", "status_code": 200,
+              "content_type": "", "body": "", "truncated": False,
+              "mocked": False}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("fetchUrl", result))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    client_mod.fetch_url("http://localhost/")
+    assert captured["body"]["variables"]["c"] is None
+
+
+def test_fetch_url_mock_lookup_round_trip(client_mod, monkeypatch):
+    """Mocked responses carry mock_source_doc — verify pass-through."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    result = {"url": "http://127.0.0.1/api", "status_code": 200,
+              "content_type": "application/json", "body": "{}",
+              "truncated": False, "mocked": True,
+              "mock_source_doc": "doc-mock-1", "ack": "tc-2"}
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(_ok_payload("fetchUrl", result)))
+    out = client_mod.fetch_url("http://127.0.0.1/api")
+    assert out is not None
+    assert out["mocked"] is True
+    assert out["mock_source_doc"] == "doc-mock-1"
+
+
+def test_fetch_url_non_dict_returns_none(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    payload = json.dumps(
+        {"data": {"fetchUrl": "not-a-dict"}}).encode("utf-8")
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(payload))
+    assert client_mod.fetch_url("http://localhost/") is None
+    assert "non-dict" in (client_mod.last_error_text() or "")
