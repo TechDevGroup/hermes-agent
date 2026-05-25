@@ -277,3 +277,151 @@ def test_assert_output_non_dict_response_returns_none(
         lambda r, timeout=None: _FakeResp(payload))
     assert client_mod.assert_output("c", "f") is None
     assert "non-dict" in (client_mod.last_error_text() or "")
+
+
+# ─── read_artifact (G2c, #61) ─────────────────────────────────
+
+def test_read_artifact_empty_path_returns_none(client_mod):
+    assert client_mod.read_artifact("") is None
+
+
+def test_read_artifact_happy_path(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    result = {"id": "tc-1", "path": "/tmp/foo", "content": "hello\n",
+              "size": 6, "ack": "tc-1", "truncated": False,
+              "strategy": "raw"}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("readArtifact", result))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    out = client_mod.read_artifact("/tmp/foo", ctx_id="ctx-7")
+    assert out is not None
+    assert out["content"] == "hello\n"
+    assert captured["body"]["variables"]["p"] == "/tmp/foo"
+    assert captured["body"]["variables"]["c"] == "ctx-7"
+    assert captured["body"]["variables"]["s"] == "raw"
+
+
+def test_read_artifact_strategy_threaded(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    result = {"id": "tc-2", "path": "/p", "content": "x",
+              "size": 1, "strategy": "outline"}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("readArtifact", result))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    client_mod.read_artifact("/p", strategy="outline")
+    assert captured["body"]["variables"]["s"] == "outline"
+
+
+def test_read_artifact_non_dict_returns_none(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    payload = json.dumps(
+        {"data": {"readArtifact": "not-a-dict"}}).encode("utf-8")
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(payload))
+    assert client_mod.read_artifact("/p") is None
+    assert "non-dict" in (client_mod.last_error_text() or "")
+
+
+# ─── preview_patch (G2c, #61) ─────────────────────────────────
+
+def test_preview_patch_empty_args_return_none(client_mod):
+    assert client_mod.preview_patch("", "f", "r") is None
+    # find=None short-circuits (caller-side guard)
+    assert client_mod.preview_patch("/p", None, "r") is None
+
+
+def test_preview_patch_happy_path(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    result = {"confirm_token": "abc123",
+              "diff": "--- /p\n+++ /p\n@@\n-old\n+new\n",
+              "windows": []}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("previewPatch", result))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    out = client_mod.preview_patch("/p", "old", "new")
+    assert out is not None
+    assert out["confirm_token"] == "abc123"
+    assert captured["body"]["variables"]["p"] == "/p"
+    assert captured["body"]["variables"]["f"] == "old"
+    assert captured["body"]["variables"]["r"] == "new"
+
+
+def test_preview_patch_in_band_error_returns_result(
+        client_mod, monkeypatch):
+    """When find-string is missing, devagentic returns an in-band
+    error dict (not a GraphQL ``errors`` array). The client returns
+    it as-is so the wrapper can surface the hint to the worker."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    err = {"error": "find string not present in '/p'",
+           "find_found": False, "file_head": "..."}
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(_ok_payload("previewPatch", err)))
+    out = client_mod.preview_patch("/p", "old", "new")
+    assert out is not None
+    assert out["find_found"] is False
+
+
+# ─── patch_artifact (G2c, #61) ────────────────────────────────
+
+def test_patch_artifact_empty_args_return_none(client_mod):
+    assert client_mod.patch_artifact("", "f", "r") is None
+    assert client_mod.patch_artifact("/p", None, "r") is None
+
+
+def test_patch_artifact_happy_path_with_token(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    result = {"id": "tc-9", "path": "/p", "written": True,
+              "replacements": 1, "ack": "tc-9"}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("patchArtifact", result))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    out = client_mod.patch_artifact(
+        "/p", "old", "new", confirm_token="abc123")
+    assert out is not None
+    assert out["written"] is True
+    assert captured["body"]["variables"]["t"] == "abc123"
+
+
+def test_patch_artifact_omitted_token_sends_null(client_mod, monkeypatch):
+    """When the worker is operating in a dev-scoped ctx, the
+    confirm_token is bypassed. Verify omission passes null (not the
+    string 'None') so the resolver's null-check fires."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    result = {"id": "tc-10", "path": "/p", "written": True,
+              "replacements": 1}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("patchArtifact", result))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    client_mod.patch_artifact("/p", "old", "new", ctx_id="dev:foo")
+    assert captured["body"]["variables"]["t"] is None
+    assert captured["body"]["variables"]["c"] == "dev:foo"
+
+
+def test_patch_artifact_non_dict_returns_none(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    payload = json.dumps(
+        {"data": {"patchArtifact": "not-a-dict"}}).encode("utf-8")
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(payload))
+    assert client_mod.patch_artifact("/p", "o", "n") is None
+    assert "non-dict" in (client_mod.last_error_text() or "")

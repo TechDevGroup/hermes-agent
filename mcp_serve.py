@@ -1485,12 +1485,19 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
       * ``confer_run`` — wraps devagentic's ``runConferLoop`` mutation
       * ``assert_output`` — wraps devagentic's ``assertOutput`` mutation
         (closes hermes-agent#60 / G2b)
+      * ``read_artifact`` — wraps devagentic's ``readArtifact`` mutation
+        (closes hermes-agent#61 / G2c part 1)
+      * ``preview_patch`` — wraps devagentic's ``previewPatch`` query
+        (closes hermes-agent#61 / G2c part 2, companion to
+        patch_artifact: supplies the confirm_token)
+      * ``patch_artifact`` — wraps devagentic's ``patchArtifact``
+        mutation (closes hermes-agent#61 / G2c part 3)
 
     Not registered here (already in ``_register_docs_tools``):
       ``doc_write`` (writeDoc), ``fork_*`` (forkContext family).
 
     Follow-up tools tracked under #56:
-      ``patch_artifact``, ``read_artifact``, ``fetch_url``.
+      ``fetch_url`` (#62 / G2d).
     """
 
     def _err(msg: str) -> str:
@@ -1605,6 +1612,111 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
         if verdict is None:
             return _err("assert_output failed" + _reason(c))
         return json.dumps(verdict, indent=2)
+
+    @mcp.tool()
+    def read_artifact(path: str, ctx_id: Optional[str] = None,
+                      strategy: Optional[str] = "raw") -> str:
+        """Read a file from the active devagentic workspace (#61 G2c).
+
+        Wraps devagentic's ``readArtifact`` mutation. Devagentic
+        scopes the read to the active workspace (filesystem /
+        ssh-remote / sandbox-backend) and applies a 32K cap unless
+        ``ctx_id`` is dev-scoped (then 256K).
+
+        Args:
+            path: File path to read.
+            ctx_id: Optional ctx id. When supplied and dev-scoped
+                (tag prefix ``dev:*`` / ``concern:phase*``),
+                unlocks the 256K cap.
+            strategy: ``"raw"`` (default) or one of devagentic's
+                registered read strategies. Strategy args are not
+                exposed through this MCP wrapper — call
+                ``silo_query`` or write a custom strategy entry to
+                use advanced strategies.
+
+        Returns: JSON ``{id, path, content, size, ack, truncated,
+        strategy, ...}`` on success, or ``{"error": ...}``.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available")
+        if not path:
+            return _err("path is required")
+        result = c.read_artifact(
+            path=path, ctx_id=ctx_id, strategy=strategy)
+        if result is None:
+            return _err("read_artifact failed" + _reason(c))
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def preview_patch(path: str, find: str, replace: str) -> str:
+        """Preview a find/replace patch (#61 G2c).
+
+        Wraps devagentic's ``previewPatch`` query field. Computes
+        the diff + returns a ``confirm_token`` that
+        ``patch_artifact`` requires (outside dev-scoped contexts).
+        Read-only on the worker side; no write side effects.
+
+        Args:
+            path: File path to preview the patch against.
+            find: Exact text to locate. Only the first occurrence
+                is targeted (mirrors
+                ``str.replace(find, replace, 1)``).
+            replace: Replacement text.
+
+        Returns: JSON ``{confirm_token, diff, windows,
+        syntax_check, ...}`` on success — or an in-band
+        ``{"error": ...}`` when the find string isn't present /
+        the file isn't found / a syntax check fails. Transport
+        failures collapse to ``{"error": ...}`` too.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available")
+        if not path or find is None:
+            return _err("path and find are required")
+        result = c.preview_patch(path=path, find=find, replace=replace)
+        if result is None:
+            return _err("preview_patch failed" + _reason(c))
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def patch_artifact(path: str, find: str, replace: str,
+                       confirm_token: Optional[str] = None,
+                       ctx_id: Optional[str] = None) -> str:
+        """Apply a find/replace patch in place (#61 G2c).
+
+        Wraps devagentic's ``patchArtifact`` mutation. Requires
+        ``confirm_token`` from a prior ``preview_patch`` call
+        unless ``ctx_id`` is dev-scoped or a sandbox-backend is
+        active. Devagentic side enforces the gate, does the find/
+        replace, writes back via the active workspace, and emits
+        the ``tool_call`` audit node.
+
+        Args:
+            path: File path to patch.
+            find: Exact text to locate (single replacement).
+            replace: Replacement text.
+            confirm_token: Token from a prior ``preview_patch``
+                call. Required outside dev-scoped + sandbox-backend
+                contexts; omitted (None) is fine in dev-scoped ctx.
+            ctx_id: Optional ctx id. When dev-scoped, bypasses the
+                confirm_token requirement.
+
+        Returns: JSON ``{id, path, written, replacements, ack,
+        ...}`` on success, or ``{"error": ...}``.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available")
+        if not path or find is None:
+            return _err("path and find are required")
+        result = c.patch_artifact(
+            path=path, find=find, replace=replace,
+            confirm_token=confirm_token, ctx_id=ctx_id)
+        if result is None:
+            return _err("patch_artifact failed" + _reason(c))
+        return json.dumps(result, indent=2)
 
 
 def _resolve_github_client():

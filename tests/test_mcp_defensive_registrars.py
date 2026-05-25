@@ -35,6 +35,9 @@ _REQUIRED_DEVAGENTIC_TOOLS = {
     "silo_query",
     "confer_run",
     "assert_output",  # G2b (#60)
+    "read_artifact",  # G2c (#61) — companion read tool
+    "preview_patch",  # G2c (#61) — supplies confirm_token
+    "patch_artifact",  # G2c (#61) — in-place find/replace
     # G3 — hermes-github
     "file_issue",
     # G4 — devagentic-lane-h
