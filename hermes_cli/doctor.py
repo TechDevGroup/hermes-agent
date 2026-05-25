@@ -727,6 +727,57 @@ def _check_provider_env_vars() -> None:
                "legacy env fallback — below persisted config")
 
 
+def _check_tools_subset_env() -> None:
+    """Surface the active ``HERMES_TOOLS_SUBSET`` (#75/#87) when set.
+
+    Silent when unset/empty — most operators don't narrow the tool
+    surface (silent-when-irrelevant pattern). When set, surfaces:
+
+      * ``check_ok`` with the count + the parsed names, so the
+        operator can confirm the filter parsed as expected;
+      * ``check_info`` reminder to use the ``mcp_<server>_<tool>``
+        prefix shape for MCP tools (the most common parse-correctly-
+        but-filter-nothing failure mode).
+
+    Cross-checking against the live MCP registry is deliberately
+    out-of-scope here: it would require spinning up
+    ``create_mcp_server()`` at probe time. Operators who want the
+    cross-check can run ``hermes mcp list`` separately and diff
+    against this output.
+    """
+    try:
+        from hermes_cli.tool_subset import (
+            ENV_VAR as _ENV_VAR,
+            get_subset_allow as _get_subset_allow,
+        )
+    except Exception:  # noqa: BLE001
+        return  # Module missing → silent (no env-var to validate).
+
+    subset = _get_subset_allow()
+    if subset is None:
+        return  # unset/empty → silent
+
+    _section("HERMES_TOOLS_SUBSET")
+    sorted_names = sorted(subset)
+    sample = ", ".join(sorted_names[:6])
+    suffix = f" (+{len(sorted_names) - 6} more)" if len(sorted_names) > 6 else ""
+    check_ok(
+        f"{_ENV_VAR}={len(sorted_names)} tools allowed",
+        f"({sample}{suffix})",
+    )
+
+    # If no name uses the mcp_ prefix AND some name looks "structured"
+    # (has an underscore — suggests the operator probably MEANT an MCP
+    # tool), surface the prefix reminder. Info, not warn — bare names
+    # ARE valid for built-in tools.
+    mcp_prefixed = sum(1 for n in sorted_names if n.startswith("mcp_"))
+    if mcp_prefixed == 0 and any("_" in n for n in sorted_names):
+        check_info(
+            "Reminder: MCP tools use the 'mcp_<server>_<tool>' prefix; "
+            "bare names are built-in tools only."
+        )
+
+
 _APIKEY_PROVIDERS_CACHE: list | None = None
 
 
@@ -2447,6 +2498,7 @@ def run_doctor(args):
     _check_gateway_runtime()
     _check_acp_installation(issues)
     _check_provider_env_vars()
+    _check_tools_subset_env()
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
