@@ -846,8 +846,19 @@ def run_conversation(
             # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
             if "finish_reason" in api_msg:
                 api_msg.pop("finish_reason")
-            # Strip internal thinking-prefill marker
-            api_msg.pop("_thinking_prefill", None)
+            # Strip ALL internal markers — keys starting with ``_`` are
+            # hermes-side bookkeeping (``_thinking_prefill``,
+            # ``_empty_recovery_synthetic``, ``_empty_terminal_sentinel``,
+            # etc.) and MUST NOT round-trip to upstream APIs. Strict
+            # OpenAI-compat validators (Groq, Mistral, Fireworks) reject
+            # unknown properties with HTTP 400, which cascades on every
+            # retry. The leading-underscore convention is a stable
+            # contract for hermes-internal fields; anything that genuinely
+            # needs to ride the API has a documented OpenAI shape.
+            # Closes hermes-agent#110.
+            for _k in [k for k in api_msg if isinstance(k, str)
+                       and k.startswith("_")]:
+                api_msg.pop(_k, None)
             # Strip Codex Responses API fields (call_id, response_item_id) for
             # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
             # Uses new dicts so the internal messages list retains the fields
