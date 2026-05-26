@@ -72,6 +72,24 @@ INTENT_KEYS = frozenset({
     "code", "confer", "planning", "exploration", "refinement", "generic",
 })
 
+# Issue #105 — persona deference.
+# When set to a truthy value, hermes-cli treats devagentic (or any
+# upstream system-prompt source) as authoritative for identity +
+# persona + skills guidance. The ``stable`` layer drops:
+#   - SOUL.md persona document
+#   - ``DEFAULT_AGENT_IDENTITY`` (the "Hermes Agent by Nous Research"
+#     paragraph) — falls through to no built-in identity at all so
+#     the model answers "what's in your preamble" with the upstream
+#     preamble's content rather than hermes-cli's baked persona
+#   - ``HERMES_AGENT_HELP_GUIDANCE`` (CLI-specific operator help)
+#   - ``SKILLS_GUIDANCE``, ``KANBAN_GUIDANCE``, ``SESSION_SEARCH_GUIDANCE``,
+#     and the full skills_prompt block (all CLI-specific)
+# Keeps: tool-use enforcement, per-model operational guidance, env
+# hints, platform hints, memory guidance, context + volatile layers.
+DEFER_PERSONA_ENV = "HERMES_DEFER_PERSONA"
+_DEFER_PERSONA_TRUTHY = frozenset(
+    {"1", "true", "yes", "on"})
+
 
 def _resolve_intent_override() -> Optional[str]:
     """Read ``HERMES_INTENT_OVERRIDE`` from env. Returns the
@@ -87,6 +105,19 @@ def _resolve_intent_override() -> Optional[str]:
     if not raw:
         return None
     return raw if raw in INTENT_KEYS else None
+
+
+def _resolve_persona_deferred() -> bool:
+    """Read ``HERMES_DEFER_PERSONA`` from env. Returns True iff set to
+    a truthy value (``1``/``true``/``yes``/``on``).
+
+    Operators set this in container deployments where devagentic (or
+    another upstream preamble source) owns the identity + persona
+    surface. The hermes-side baked persona shouldn't override what
+    devagentic injected via R5 workflow-preamble lift.
+    """
+    return (os.environ.get(DEFER_PERSONA_ENV, "").strip().lower()
+            in _DEFER_PERSONA_TRUTHY)
 
 
 def _ra():
@@ -135,6 +166,17 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _intent_override = _resolve_intent_override()
     _narrow_for_code = (_intent_override == "code")
 
+    # Resolve persona-deferral flag (issue #105). When set, hermes-cli
+    # treats the upstream system-prompt source (devagentic's R5
+    # workflow-preamble or similar) as authoritative for identity +
+    # persona and drops the baked persona blocks entirely. Strictly
+    # broader than the code-intent narrowing — also drops
+    # ``DEFAULT_AGENT_IDENTITY`` itself (the "Hermes Agent by Nous
+    # Research" paragraph). Composes with ``_narrow_for_code``:
+    # either flag is sufficient to drop a given block.
+    _defer_persona = _resolve_persona_deferred()
+    _narrow_persona = _narrow_for_code or _defer_persona
+
     # ── Stable tier ────────────────────────────────────────────────
     stable_parts: List[str] = []
 
@@ -143,38 +185,45 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # cwd project instructions disabled.
     # #97: when narrowing for code intent, skip SOUL.md entirely and
     # fall through to DEFAULT_AGENT_IDENTITY (shorter identity floor).
+    # #105: when HERMES_DEFER_PERSONA is set, skip SOUL.md AND
+    # DEFAULT_AGENT_IDENTITY — defer entirely to upstream preamble.
     _soul_loaded = False
-    if (not _narrow_for_code) and (agent.load_soul_identity or not agent.skip_context_files):
+    if (not _narrow_persona) and (agent.load_soul_identity or not agent.skip_context_files):
         _soul_content = _r.load_soul_md()
         if _soul_content:
             stable_parts.append(_soul_content)
             _soul_loaded = True
 
-    if not _soul_loaded:
-        # Fallback to hardcoded identity
+    if not _soul_loaded and not _defer_persona:
+        # Fallback to hardcoded identity. #105: when deferring persona
+        # entirely, even this short identity is dropped — upstream
+        # preamble owns the identity surface.
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
     # #97: skipped under code-intent narrowing (off-topic for tool-call traffic).
-    if not _narrow_for_code:
+    # #105: skipped when deferring persona (CLI-specific operator help).
+    if not _narrow_persona:
         stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded.
     # #97 narrowing for code intent: keep MEMORY_GUIDANCE (small +
     # sometimes useful), drop SESSION_SEARCH / SKILLS / KANBAN
     # (off-topic for code-only workers).
+    # #105: same narrowing applies — drop SESSION_SEARCH / SKILLS /
+    # KANBAN; keep MEMORY (memory is useful even when persona is deferred).
     tool_guidance = []
     if "memory" in agent.valid_tool_names:
         tool_guidance.append(MEMORY_GUIDANCE)
-    if "session_search" in agent.valid_tool_names and not _narrow_for_code:
+    if "session_search" in agent.valid_tool_names and not _narrow_persona:
         tool_guidance.append(SESSION_SEARCH_GUIDANCE)
-    if "skill_manage" in agent.valid_tool_names and not _narrow_for_code:
+    if "skill_manage" in agent.valid_tool_names and not _narrow_persona:
         tool_guidance.append(SKILLS_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
     # this block. Resolved once at __init__ (see _kanban_worker_guidance).
-    if not _narrow_for_code:
+    if not _narrow_persona:
         _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
         if _kanban_guidance:
             tool_guidance.append(_kanban_guidance)
@@ -232,8 +281,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # #97: the skills_prompt block is the single biggest contributor
     # to prompt mass when many skills are loaded. Skipped under code-
     # intent narrowing.
+    # #105: skipped when deferring persona (skills are CLI-specific).
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
-    if has_skills_tools and not _narrow_for_code:
+    if has_skills_tools and not _narrow_persona:
         avail_toolsets = {
             toolset
             for toolset in (
