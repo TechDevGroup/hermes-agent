@@ -95,6 +95,73 @@ class TestGenerateTitle:
         with patch("agent.title_generator.call_llm", side_effect=RuntimeError("nope")):
             assert generate_title("q", "a") is None
 
+    def test_auth_error_does_not_invoke_failure_callback(self):
+        """Auth errors (401) on title-gen are container-deploy credential
+        mismatches — not actionable user-facing failures. Skip the
+        ``_emit_auxiliary_failure`` callback so chats don't surface
+        ``Auxiliary title generation failed: HTTP 401`` on every turn.
+        Closes hermes-agent#100."""
+        captured = []
+
+        def _cb(task, exc):
+            captured.append((task, exc))
+
+        # Synthesize an auth error matching _is_auth_error's detection
+        # (status_code=401).
+        class _AuthError(Exception):
+            pass
+        auth_exc = _AuthError("HTTP 401: invalid bearer token")
+        auth_exc.status_code = 401
+
+        with patch("agent.title_generator.call_llm", side_effect=auth_exc):
+            result = generate_title("question", "answer", failure_callback=_cb)
+
+        assert result is None
+        # Callback NOT invoked — auth failures are silently skipped.
+        assert captured == []
+
+    def test_auth_error_logs_at_debug_not_warning(self, caplog):
+        """The 401 path downgrades the log line from WARNING to DEBUG
+        so ``agent.log`` doesn't accumulate noise on every chat."""
+        import logging as _logging
+
+        class _AuthError(Exception):
+            pass
+        auth_exc = _AuthError("invalid_api_key")
+        auth_exc.status_code = 401
+
+        with caplog.at_level(_logging.DEBUG, logger="agent.title_generator"):
+            with patch("agent.title_generator.call_llm", side_effect=auth_exc):
+                result = generate_title("q", "a")
+
+        assert result is None
+        warns = [r for r in caplog.records if r.levelno == _logging.WARNING]
+        debugs = [r for r in caplog.records if r.levelno == _logging.DEBUG]
+        # No WARNING surfaced for the auth case.
+        assert not any("Title generation failed" in r.getMessage()
+                       for r in warns)
+        # DEBUG line records the skip for operators who dig.
+        assert any("Title generation skipped" in r.getMessage()
+                   for r in debugs), [r.getMessage() for r in debugs]
+
+    def test_non_auth_error_still_invokes_callback(self):
+        """Non-auth errors (402 payment, network, etc.) still surface
+        through ``failure_callback`` — those ARE actionable."""
+        captured = []
+
+        def _cb(task, exc):
+            captured.append((task, exc))
+
+        # 402 is the OpenRouter 'credits exhausted' shape — still
+        # legitimately a "tell the user" outage.
+        with patch("agent.title_generator.call_llm",
+                   side_effect=RuntimeError("HTTP 402: insufficient credits")):
+            result = generate_title("q", "a", failure_callback=_cb)
+
+        assert result is None
+        assert len(captured) == 1
+        assert captured[0][0] == "title generation"
+
     def test_truncates_long_messages(self):
         """Long user/assistant messages should be truncated in the LLM request."""
         captured_kwargs = {}

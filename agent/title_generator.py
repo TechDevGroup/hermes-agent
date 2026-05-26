@@ -8,7 +8,7 @@ import logging
 import threading
 from typing import Callable, Optional
 
-from agent.auxiliary_client import call_llm
+from agent.auxiliary_client import _is_auth_error, call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,22 @@ def generate_title(
             title = title[:77] + "..."
         return title if title else None
     except Exception as e:
+        # Auth errors on title-gen are almost always a container-deploy
+        # credential mismatch (e.g., devagentic-local main provider has
+        # a bearer, but the auxiliary chain fell through to OpenRouter
+        # / Anthropic with a stale or missing key). Title generation is
+        # genuinely optional — surface these at DEBUG only and skip the
+        # ``_emit_auxiliary_failure`` callback so the user-facing
+        # warning stream doesn't fill with "Auxiliary title generation
+        # failed: HTTP 401" on every chat. Non-auth failures keep the
+        # existing WARNING + callback path so real outages stay
+        # visible. Closes hermes-agent#100 (the title-gen-401 noise).
+        if _is_auth_error(e):
+            logger.debug(
+                "Title generation skipped (auth failure on auxiliary "
+                "provider — main chat unaffected): %s", e,
+            )
+            return None
         # Log at WARNING so this shows up in agent.log without debug mode.
         # Full detail at debug level for operators who need the stack.
         logger.warning("Title generation failed: %s", e)
