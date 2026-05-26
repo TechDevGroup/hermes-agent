@@ -1494,11 +1494,19 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
         mutation (closes hermes-agent#61 / G2c part 3)
       * ``fetch_url`` — wraps devagentic's ``fetchUrl`` mutation
         (closes hermes-agent#62 / G2d)
+      * ``run_pipeline`` — wraps devagentic's
+        ``executeWorkflowPipeline`` mutation (R12 of
+        devagentic#210; closes hermes-agent#100 part 1)
+      * ``propose_pipeline`` — wraps devagentic's
+        ``writeWorkflowPipeline`` mutation (R12; closes
+        hermes-agent#100 part 2)
 
     Not registered here (already in ``_register_docs_tools``):
       ``doc_write`` (writeDoc), ``fork_*`` (forkContext family).
 
-    With G2d shipped, the #56 G2 roadmap is fully closed.
+    With G2d + R12 shipped, the #56 G2 roadmap is closed +
+    devagentic#210 R12 (worker tool surface for workflow-pipelines)
+    is live.
     """
 
     def _err(msg: str) -> str:
@@ -1748,6 +1756,95 @@ def _register_devagentic_mutation_tools(mcp: "FastMCP") -> None:
         result = c.fetch_url(url=url, ctx_id=ctx_id)
         if result is None:
             return _err("fetch_url failed" + _reason(c))
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def run_pipeline(pipeline_id: str, user_id: str) -> str:
+        """Execute a workflow-pipeline end-to-end (#100 R12 of
+        devagentic#210).
+
+        Wraps devagentic's ``executeWorkflowPipeline`` mutation. Looks
+        up the ``kind:workflow-pipeline`` doc by id, validates the
+        body via the #213 DAG validator, walks nodes topologically,
+        fires the registered handler for each node intent (canonical:
+        ``lane-h-emit`` / ``lift-from-graft`` / ``dispatch-worker`` /
+        ``write-outcome``), threads state between nodes, persists a
+        ``kind:pipeline-run`` doc, and returns the run shape
+        synchronously.
+
+        Stop-on-first-failure: the first handler exception halts the
+        run and the remaining nodes report ``status='skipped'``.
+        Devagentic#259 (R8b) adds continue-on-failure + retries +
+        parallel handlers — those are configured in the pipeline doc
+        itself, not via tool args.
+
+        Args:
+            pipeline_id: Doc id of the workflow-pipeline (typically
+                from a prior ``propose_pipeline`` call).
+            user_id: User scope for the run.
+
+        Returns: JSON ``{runId, pipelineRef, userId, status,
+        startedTs, completedTs, errorMessage?, nodeOutcomes: [{nodeId,
+        intent, status, ...}]}`` on success, or ``{"error": ...}``.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available")
+        if not pipeline_id or not user_id:
+            return _err("pipeline_id and user_id are required")
+        result = c.run_pipeline(
+            pipeline_id=pipeline_id, user_id=user_id)
+        if result is None:
+            return _err("run_pipeline failed" + _reason(c))
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def propose_pipeline(name: str, intent: str, version: int,
+                         nodes: list, edges: list, user_id: str,
+                         lineage_ref: Optional[str] = None,
+                         produced_by: Optional[str] = None) -> str:
+        """Persist a new workflow-pipeline doc (#100 R12 of
+        devagentic#210).
+
+        Wraps devagentic's ``writeWorkflowPipeline`` mutation. The
+        devagentic side validates DAG shape (#213 validator) before
+        writing — an invalid pipeline raises devagentic-side and no
+        doc is written. The returned Doc id is the input for
+        ``run_pipeline``.
+
+        Args:
+            name: Human-readable pipeline name.
+            intent: Intent key (matches devagentic#240's classifier:
+                ``code`` / ``confer`` / ``planning`` /
+                ``exploration`` / ``refinement`` / ``generic``).
+            version: Integer pipeline version (>=1).
+            nodes: List of node dicts: each has ``id``, ``intent``,
+                plus handler-specific config.
+            edges: List of edge dicts: each has ``from``, ``to``.
+            user_id: User scope for the new pipeline doc.
+            lineage_ref: Optional parent doc id when this pipeline
+                revises an earlier one.
+            produced_by: Optional source attribution (``worker``,
+                ``orchestrator``, etc.).
+
+        Returns: JSON ``{id, content, tags, source, ts}`` on success,
+        or ``{"error": ...}``.
+        """
+        c = _resolve_mutations_client()
+        if c is None:
+            return _err("devagentic-mutations plugin not available")
+        if not name or not intent or not user_id:
+            return _err("name, intent, and user_id are required")
+        if not isinstance(version, int) or version < 1:
+            return _err("version must be a positive int")
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            return _err("nodes and edges must be lists")
+        result = c.propose_pipeline(
+            name=name, intent=intent, version=version,
+            nodes=nodes, edges=edges, user_id=user_id,
+            lineage_ref=lineage_ref, produced_by=produced_by)
+        if result is None:
+            return _err("propose_pipeline failed" + _reason(c))
         return json.dumps(result, indent=2)
 
 

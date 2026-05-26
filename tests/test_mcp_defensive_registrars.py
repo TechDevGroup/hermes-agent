@@ -39,6 +39,8 @@ _REQUIRED_DEVAGENTIC_TOOLS = {
     "preview_patch",  # G2c (#61) — supplies confirm_token
     "patch_artifact",  # G2c (#61) — in-place find/replace
     "fetch_url",  # G2d (#62) — localhost-only HTTP fetch
+    "run_pipeline",  # R12 (#100) — executeWorkflowPipeline wrapper
+    "propose_pipeline",  # R12 (#100) — writeWorkflowPipeline wrapper
     # G3 — hermes-github
     "file_issue",
     # G4 — devagentic-lane-h
