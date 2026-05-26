@@ -431,6 +431,135 @@ def fetch_url(
     return result
 
 
+_EXECUTE_WORKFLOW_PIPELINE_MUTATION = """mutation($p:String!,$u:String!){
+    executeWorkflowPipeline(pipelineId:$p, userId:$u){
+        runId pipelineRef userId status
+        startedTs completedTs errorMessage
+        nodeOutcomes {
+            nodeId intent status startedTs completedTs
+            outputSummary errorMessage retryCount
+        }
+    }
+}"""
+
+
+def run_pipeline(
+    pipeline_id: str,
+    user_id: str,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Optional[dict]:
+    """Wrap devagentic's ``executeWorkflowPipeline`` mutation (R12 of
+    devagentic#210). Looks up a ``kind:workflow-pipeline`` doc by id,
+    walks its node DAG topologically, and returns the full
+    ``PipelineRun`` structure synchronously.
+
+    Args:
+        pipeline_id: Doc id of the workflow-pipeline (typically
+            from a prior ``propose_pipeline`` call or a previously
+            authored pipeline doc).
+        user_id: User scope for the run; threaded into per-node
+            handlers + the resulting ``kind:pipeline-run`` doc.
+
+    Returns the run dict ``{runId, pipelineRef, userId, status,
+    startedTs, completedTs, errorMessage?, nodeOutcomes: [...]}``
+    on success or ``None`` on failure (see ``last_error_text()``).
+    """
+    if not pipeline_id or not user_id:
+        _record_error("pipeline_id and user_id are required")
+        return None
+    data = _post_graphql(
+        _EXECUTE_WORKFLOW_PIPELINE_MUTATION,
+        {"p": pipeline_id, "u": user_id},
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    result = data.get("executeWorkflowPipeline")
+    if not isinstance(result, dict):
+        _record_error("executeWorkflowPipeline returned non-dict")
+        return None
+    return result
+
+
+_WRITE_WORKFLOW_PIPELINE_MUTATION = """mutation(
+    $n:String!,$i:String!,$v:Int!,$nodes:JSON!,$edges:JSON!,$u:String!,
+    $lr:String,$pb:String){
+    writeWorkflowPipeline(
+        name:$n, intent:$i, version:$v,
+        nodes:$nodes, edges:$edges, userId:$u,
+        lineageRef:$lr, producedBy:$pb
+    ){
+        id content tags source ts
+    }
+}"""
+
+
+def propose_pipeline(
+    name: str,
+    intent: str,
+    version: int,
+    nodes: list,
+    edges: list,
+    user_id: str,
+    lineage_ref: Optional[str] = None,
+    produced_by: Optional[str] = None,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT,
+) -> Optional[dict]:
+    """Wrap devagentic's ``writeWorkflowPipeline`` mutation (R12 of
+    devagentic#210). Validates the pipeline DAG via #213's validator,
+    composes the body, and persists a ``kind:workflow-pipeline``
+    Doc. An invalid pipeline shape raises devagentic-side before any
+    doc is written.
+
+    Args:
+        name: Human-readable pipeline name.
+        intent: Intent key (matches devagentic#240's classifier
+            vocabulary: ``code`` / ``confer`` / ``planning`` /
+            ``exploration`` / ``refinement`` / ``generic``).
+        version: Integer pipeline version. Increment per revision.
+        nodes: List of node dicts. Each node has ``id``,
+            ``intent``, plus handler-specific config.
+        edges: List of edge dicts. Each edge has ``from``, ``to``.
+        user_id: User scope for the new pipeline doc.
+        lineage_ref: Optional parent doc id (when this pipeline
+            revises an earlier one).
+        produced_by: Optional source attribution (worker /
+            orchestrator).
+
+    Returns the persisted Doc shape ``{id, content, tags, source,
+    ts}`` on success or ``None`` on failure (see
+    ``last_error_text()``).
+    """
+    if not name or not intent or not user_id:
+        _record_error("name, intent, and user_id are required")
+        return None
+    if not isinstance(version, int) or version < 1:
+        _record_error("version must be a positive int")
+        return None
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        _record_error("nodes and edges must be lists")
+        return None
+    data = _post_graphql(
+        _WRITE_WORKFLOW_PIPELINE_MUTATION,
+        {
+            "n": name, "i": intent, "v": int(version),
+            "nodes": nodes, "edges": edges, "u": user_id,
+            "lr": lineage_ref or None,
+            "pb": produced_by or None,
+        },
+        timeout=timeout,
+    )
+    if data is None:
+        return None
+    result = data.get("writeWorkflowPipeline")
+    if not isinstance(result, dict):
+        _record_error("writeWorkflowPipeline returned non-dict")
+        return None
+    return result
+
+
 _RUN_CONFER_LOOP_MUTATION = """mutation($u:String!,$c:String!){
     runConferLoop(userId:$u, candidateId:$c)
 }"""

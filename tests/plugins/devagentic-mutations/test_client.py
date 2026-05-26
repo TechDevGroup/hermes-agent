@@ -494,3 +494,142 @@ def test_fetch_url_non_dict_returns_none(client_mod, monkeypatch):
         lambda r, timeout=None: _FakeResp(payload))
     assert client_mod.fetch_url("http://localhost/") is None
     assert "non-dict" in (client_mod.last_error_text() or "")
+
+
+# ─── run_pipeline (R12 / #100) ────────────────────────────────
+
+def test_run_pipeline_empty_args_return_none(client_mod):
+    assert client_mod.run_pipeline("", "alice") is None
+    assert client_mod.run_pipeline("pipe-1", "") is None
+
+
+def test_run_pipeline_happy_path(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    run = {
+        "runId": "run-9", "pipelineRef": "pipe-1", "userId": "alice",
+        "status": "success",
+        "startedTs": "2026-05-26T23:30:00Z",
+        "completedTs": "2026-05-26T23:30:05Z",
+        "errorMessage": None,
+        "nodeOutcomes": [
+            {"nodeId": "n1", "intent": "lane-h-emit", "status": "success",
+             "startedTs": "t1", "completedTs": "t2",
+             "outputSummary": "emitted", "errorMessage": None,
+             "retryCount": 0},
+        ],
+    }
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("executeWorkflowPipeline", run))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    out = client_mod.run_pipeline("pipe-1", "alice")
+    assert out is not None
+    assert out["status"] == "success"
+    assert out["nodeOutcomes"][0]["nodeId"] == "n1"
+    assert captured["body"]["variables"]["p"] == "pipe-1"
+    assert captured["body"]["variables"]["u"] == "alice"
+
+
+def test_run_pipeline_non_dict_returns_none(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    payload = json.dumps(
+        {"data": {"executeWorkflowPipeline": "not-a-dict"}}).encode("utf-8")
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(payload))
+    assert client_mod.run_pipeline("pipe-1", "alice") is None
+    assert "non-dict" in (client_mod.last_error_text() or "")
+
+
+# ─── propose_pipeline (R12 / #100) ────────────────────────────
+
+def test_propose_pipeline_empty_args_return_none(client_mod):
+    assert client_mod.propose_pipeline(
+        "", "code", 1, [], [], "alice") is None
+    assert client_mod.propose_pipeline(
+        "p", "", 1, [], [], "alice") is None
+    assert client_mod.propose_pipeline(
+        "p", "code", 1, [], [], "") is None
+
+
+def test_propose_pipeline_invalid_version_returns_none(client_mod):
+    """version must be a positive int."""
+    assert client_mod.propose_pipeline(
+        "p", "code", 0, [], [], "alice") is None
+    assert client_mod.propose_pipeline(
+        "p", "code", -1, [], [], "alice") is None
+    assert client_mod.propose_pipeline(
+        "p", "code", "1", [], [], "alice") is None  # str, not int
+
+
+def test_propose_pipeline_invalid_nodes_edges_return_none(client_mod):
+    """nodes + edges must be lists."""
+    assert client_mod.propose_pipeline(
+        "p", "code", 1, "not-a-list", [], "alice") is None
+    assert client_mod.propose_pipeline(
+        "p", "code", 1, [], "not-a-list", "alice") is None
+
+
+def test_propose_pipeline_happy_path(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    doc = {
+        "id": "doc-pipeline-7",
+        "content": "workflow-pipeline 'demo' v1",
+        "tags": ["kind:workflow-pipeline", "intent:code", "user:alice"],
+        "source": "worker",
+        "ts": "2026-05-26T23:30:00Z",
+    }
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("writeWorkflowPipeline", doc))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    nodes = [{"id": "n1", "intent": "lane-h-emit"}]
+    edges: list = []
+    out = client_mod.propose_pipeline(
+        "demo", "code", 1, nodes, edges, "alice",
+        lineage_ref="doc-old", produced_by="worker")
+    assert out is not None
+    assert out["id"] == "doc-pipeline-7"
+    assert captured["body"]["variables"]["n"] == "demo"
+    assert captured["body"]["variables"]["i"] == "code"
+    assert captured["body"]["variables"]["v"] == 1
+    assert captured["body"]["variables"]["nodes"] == nodes
+    assert captured["body"]["variables"]["edges"] == edges
+    assert captured["body"]["variables"]["u"] == "alice"
+    assert captured["body"]["variables"]["lr"] == "doc-old"
+    assert captured["body"]["variables"]["pb"] == "worker"
+
+
+def test_propose_pipeline_optional_args_null_when_omitted(
+        client_mod, monkeypatch):
+    """``lineage_ref`` and ``produced_by`` should pass null (not the
+    string 'None') when omitted so devagentic's defaults fire."""
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    doc = {"id": "doc-x", "content": "x", "tags": [],
+           "source": "worker", "ts": "t"}
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(_ok_payload("writeWorkflowPipeline", doc))
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", _fake_urlopen)
+    client_mod.propose_pipeline("p", "code", 1, [], [], "alice")
+    assert captured["body"]["variables"]["lr"] is None
+    assert captured["body"]["variables"]["pb"] is None
+
+
+def test_propose_pipeline_non_dict_returns_none(client_mod, monkeypatch):
+    monkeypatch.setattr(client_mod, "resolve_user_id", lambda: "alice")
+    payload = json.dumps(
+        {"data": {"writeWorkflowPipeline": "not-a-dict"}}).encode("utf-8")
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen",
+        lambda r, timeout=None: _FakeResp(payload))
+    assert client_mod.propose_pipeline(
+        "p", "code", 1, [], [], "alice") is None
+    assert "non-dict" in (client_mod.last_error_text() or "")
