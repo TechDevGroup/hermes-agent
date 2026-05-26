@@ -3493,13 +3493,80 @@ def run_conversation(
             else:
                 # No tool calls - this is the final response
                 final_response = assistant_message.content or ""
-                
+
                 # Fix: unmute output when entering the no-tool-call branch
                 # so the user can see empty-response warnings and recovery
                 # status messages.  _mute_post_response was set during a
                 # prior housekeeping tool turn and should not silence the
                 # final response path.
                 agent._mute_post_response = False
+
+                # hermes-agent#99: model emitted a tool-call finish reason
+                # but the normalized tool_calls list reached us empty —
+                # an SDK normalization gap between raw response shape and
+                # NormalizedResponse.tool_calls. Without this branch the
+                # else path would treat the empty content as "model
+                # returned no content" and burn 3 retries (#67 structural
+                # recovery handles ``finish_reason=stop``, not the
+                # tool_calls-specific finish reasons). Surface synthetic
+                # recovery with a clear message so the worker doesn't
+                # spin. Composes with devagentic#295 (temporary
+                # tools-strip at boundary) — once that workaround lifts,
+                # this branch catches any remaining edge cases where
+                # tool_calls round-trip incorrectly.
+                _finish_wants_tools = finish_reason in {
+                    "tool_calls", "function_call"}
+                _tool_calls_absent = not (
+                    getattr(assistant_message, "tool_calls", None) or [])
+                if (_finish_wants_tools
+                        and _tool_calls_absent
+                        and not getattr(
+                            agent, "_finish_reason_tools_handled", False)):
+                    agent._finish_reason_tools_handled = True
+                    logger.warning(
+                        "Response finish_reason=%r but tool_calls is "
+                        "empty/None — SDK normalization gap or upstream "
+                        "shape issue. Surfacing synthetic recovery "
+                        "instead of empty-retry loop. model=%s "
+                        "provider=%s response_id=%s",
+                        finish_reason, agent.model,
+                        getattr(agent, "provider", "?"),
+                        getattr(assistant_message, "id", "?"),
+                    )
+                    agent._emit_status(
+                        f"⚠️ Model emitted finish_reason={finish_reason} "
+                        "but no tool_calls parsed — surfacing recovery prompt"
+                    )
+                    _synth_assistant = agent._build_assistant_message(
+                        assistant_message, finish_reason,
+                    )
+                    _synth_assistant["content"] = (
+                        f"(empty — model finish_reason={finish_reason} "
+                        "but no parsed tool_calls; possible SDK gap)"
+                    )
+                    _synth_assistant["_empty_recovery_synthetic"] = True
+                    messages.append(_synth_assistant)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Your previous response had "
+                            f"finish_reason={finish_reason!r} but no "
+                            "tool calls were emitted in a parseable "
+                            "form. This is a structural failure: "
+                            "retrying with the same input will likely "
+                            "produce the same shape. Try ONE of: "
+                            "(a) rephrase the request so the next tool "
+                            "to call is unambiguous and emit it as a "
+                            "proper tool_call, (b) explicitly invoke "
+                            "a specific tool by name, or (c) proceed "
+                            "with text only (do not invoke tools this "
+                            "turn)."
+                        ),
+                        "_empty_recovery_synthetic": True,
+                    })
+                    agent._session_messages = messages
+                    agent._save_session_log(messages)
+                    continue
                 
                 # Check if response only has think block with no actual content after it
                 if not agent._has_content_after_think_block(final_response):
