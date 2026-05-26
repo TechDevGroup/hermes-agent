@@ -771,6 +771,49 @@ def _check_intent_override_env() -> None:
         )
 
 
+def _check_persona_deferred_env() -> None:
+    """Surface ``HERMES_DEFER_PERSONA`` (#105) when set. Silent when
+    unset/empty.
+
+    When set, hermes-cli's system prompt drops SOUL.md +
+    DEFAULT_AGENT_IDENTITY + HERMES_AGENT_HELP / SKILLS / KANBAN /
+    SESSION_SEARCH guidance entirely — devagentic's R5 workflow-
+    preamble (or any upstream system-prompt source) becomes
+    authoritative. Surfaces:
+
+      * ``check_ok`` when set to a truthy value
+        (``1``/``true``/``yes``/``on``)
+      * ``check_warn`` when set to anything else (operator probably
+        meant to enable but typed the wrong value — runtime treats
+        non-truthy as off)
+    """
+    try:
+        from agent.system_prompt import (
+            DEFER_PERSONA_ENV as _ENV,
+            _DEFER_PERSONA_TRUTHY,
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+    raw = os.environ.get(_ENV, "").strip()
+    if not raw:
+        return
+
+    _section("Persona deference (#105)")
+    if raw.lower() in _DEFER_PERSONA_TRUTHY:
+        check_ok(
+            f"{_ENV}={raw!r}",
+            "(hermes-cli persona deferred; upstream preamble "
+            "is source of truth)",
+        )
+    else:
+        sample = ", ".join(sorted(_DEFER_PERSONA_TRUTHY))
+        check_warn(
+            f"{_ENV}={raw!r} is not a truthy value",
+            f"(valid truthy: {sample}; runtime treats this as off)",
+        )
+
+
 def _check_tools_subset_env() -> None:
     """Surface the active ``HERMES_TOOLS_SUBSET`` (#75/#87) when set.
 
@@ -2544,6 +2587,7 @@ def run_doctor(args):
     _check_provider_env_vars()
     _check_tools_subset_env()
     _check_intent_override_env()
+    _check_persona_deferred_env()
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
