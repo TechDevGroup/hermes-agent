@@ -1457,6 +1457,19 @@ def resolve_provider(
         return "custom"
     if normalized in PROVIDER_REGISTRY:
         return normalized
+    # Plugin-registered profiles (bundled under
+    # ``plugins/model-providers/<name>/`` or user under
+    # ``$HERMES_HOME/plugins/model-providers/<name>/``). The aliases
+    # extension above only handles alternate names; the canonical
+    # name (e.g. ``devagentic-local``) also needs to be accepted, or
+    # operators see "Unknown provider 'devagentic-local'" despite
+    # the plugin being on disk + active.
+    try:
+        from providers import get_provider_profile as _plugin_profile
+        if _plugin_profile(normalized) is not None:
+            return normalized
+    except Exception:
+        pass
     if normalized != "auto":
         # Check for common config.yaml issues that cause this error
         _config_hint = _get_config_hint_for_unknown_provider(normalized)

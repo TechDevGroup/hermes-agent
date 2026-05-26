@@ -718,4 +718,28 @@ def resolve_provider_full(
     except Exception:
         pass
 
+    # 4. Plugin-registered profiles (``providers/`` package's _REGISTRY).
+    # Bundled plugins under ``plugins/model-providers/<name>/`` and user
+    # plugins under ``$HERMES_HOME/plugins/model-providers/<name>/`` register
+    # ``ProviderProfile`` instances via ``providers.register_provider``.
+    # The ``--provider`` flag must accept these names too, or operators see
+    # confusing "Unknown provider 'devagentic-local'" rejections despite the
+    # plugin being on disk + active.
+    try:
+        from providers import get_provider_profile as _plugin_profile
+        profile = _plugin_profile(canonical) or _plugin_profile(
+            name.strip().lower())
+        if profile is not None:
+            return ProviderDef(
+                id=profile.name,
+                name=getattr(profile, "display_name", profile.name)
+                or profile.name,
+                transport="openai_chat",
+                api_key_env_vars=tuple(getattr(profile, "env_vars", ()) or ()),
+                base_url=getattr(profile, "base_url", "") or "",
+                source="plugin",
+            )
+    except Exception:
+        pass
+
     return None
