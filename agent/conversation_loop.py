@@ -3217,6 +3217,30 @@ def run_conversation(
                     invalid_name = invalid_tool_calls[0]
                     invalid_preview = invalid_name[:80] + "..." if len(invalid_name) > 80 else invalid_name
                     agent._vprint(f"{agent.log_prefix}⚠️  Unknown tool '{invalid_preview}' — sending error to model for agent-correction ({agent._invalid_tool_retries}/3)")
+                    # hermes-agent#127 — loud diagnostic. The verbose
+                    # print above is invisible in non-verbose runs, and
+                    # the model often hallucinates tool success in
+                    # narration on the next turn (covering up the
+                    # underlying mismatch). Always log + emit status so
+                    # operators see WHICH name the model invented + a
+                    # sample of registered names. Catches the
+                    # "model called write_file but only mcp_* tools
+                    # registered" class of sandbox-config bug.
+                    _valid_sample = sorted(agent.valid_tool_names)[:10]
+                    _valid_count = len(agent.valid_tool_names)
+                    logger.warning(
+                        "Invalid tool_call: model emitted %r — not in "
+                        "agent.valid_tool_names (count=%d, sample=%s). "
+                        "Retry %d/3. model=%s provider=%s",
+                        invalid_name, _valid_count, _valid_sample,
+                        agent._invalid_tool_retries, agent.model,
+                        getattr(agent, "provider", "?"),
+                    )
+                    agent._emit_status(
+                        f"⚠️ Unknown tool {invalid_name!r} — not in "
+                        f"{_valid_count} registered tools "
+                        f"(retry {agent._invalid_tool_retries}/3)"
+                    )
 
                     if agent._invalid_tool_retries >= 3:
                         agent._vprint(f"{agent.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True)
