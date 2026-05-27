@@ -54,6 +54,93 @@ def _resolve_tool_use_enforcement() -> Optional[str]:
 CASCADE_EXHAUSTED_CODE = "devagentic_cascade_exhausted"
 
 
+# Issue #121 — OpenAI-spec ``tool_call.type`` is a required string with
+# exactly one valid value (``"function"``). Some providers (mistral
+# observed; possibly others) omit the field on emitted tool_calls. If
+# the OpenAI Python SDK's strict Pydantic validation drops these
+# entries from ``response.choices[0].message.tool_calls``, hermes
+# sees an empty list + finish_reason=tool_calls and falls into the
+# #108 synthetic-recovery path — but the tool the model wanted to
+# call is lost. Fall back to inspecting the raw response dict (via
+# model_dump / model_extra) for tool_calls the SDK dropped, default
+# missing ``type`` to ``"function"``, and reconstitute them.
+_DEFAULT_TOOL_CALL_TYPE = "function"
+
+
+def _raw_tool_calls_from_response(response: Any) -> list[dict]:
+    """Read tool_calls from the raw response shape.
+
+    Tries ``response.model_dump()`` (Pydantic v2), then attribute
+    walk, then ``__dict__``. Returns a list of dicts; each entry is
+    a raw OpenAI-shape tool_call (``id``, ``function`` /
+    ``function.name`` / ``function.arguments``, optionally ``type``,
+    ``index``).
+
+    Fail-soft on attribute / parse errors — returns ``[]`` so the
+    caller falls back to whatever was already parsed.
+    """
+    if response is None:
+        return []
+    # Pydantic v2 dump path
+    dumped: dict | None = None
+    if hasattr(response, "model_dump"):
+        try:
+            dumped = response.model_dump()
+        except Exception:  # noqa: BLE001
+            dumped = None
+    if dumped is None and isinstance(response, dict):
+        dumped = response
+    if isinstance(dumped, dict):
+        choices = dumped.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            msg = choices[0].get("message") or {}
+            if isinstance(msg, dict):
+                tcs = msg.get("tool_calls") or []
+                if isinstance(tcs, list):
+                    return [tc for tc in tcs if isinstance(tc, dict)]
+    return []
+
+
+def _normalize_raw_tool_call(
+    tc_raw: dict,
+) -> Optional["ToolCall"]:
+    """Build a ``ToolCall`` from a raw dict-shape entry, defaulting
+    missing ``type`` to ``"function"`` per OpenAI-spec semantics
+    (the field is a marker for future polymorphism with exactly one
+    currently-valid value).
+
+    Returns ``None`` when the entry is unrecoverable (missing
+    function.name) so the caller skips it cleanly instead of
+    constructing a half-built tool_call.
+    """
+    if not isinstance(tc_raw, dict):
+        return None
+    fn = tc_raw.get("function") or {}
+    if not isinstance(fn, dict):
+        return None
+    name = fn.get("name")
+    if not name:
+        return None
+    arguments = fn.get("arguments")
+    if arguments is None:
+        arguments = ""
+    if not isinstance(arguments, str):
+        # Arguments may already be a dict if the response is parsed
+        # tolerantly elsewhere; serialize back to JSON string per
+        # OpenAI contract.
+        import json as _json
+        try:
+            arguments = _json.dumps(arguments)
+        except Exception:  # noqa: BLE001
+            arguments = str(arguments)
+    return ToolCall(
+        id=tc_raw.get("id"),
+        name=name,
+        arguments=arguments,
+        provider_data=None,
+    )
+
+
 def _extract_cascade_exhausted(response: Any) -> Optional[Dict[str, Any]]:
     """Detect the ``devagentic_cascade_exhausted`` sentinel on a
     chat-completion response.
@@ -673,6 +760,26 @@ class ChatCompletionsTransport(ProviderTransport):
                         provider_data=tc_provider_data or None,
                     )
                 )
+
+        # hermes-agent#121: when the SDK's strict Pydantic validation
+        # dropped tool_call entries that omitted the OpenAI-spec-
+        # required ``type`` field (mistral-large emits this shape),
+        # ``msg.tool_calls`` reaches us empty even though the wire
+        # response carried tool_calls. Recover them from the raw
+        # response dict; default missing ``type`` to ``"function"``
+        # (the only valid value per spec). Only fires when the
+        # finish_reason explicitly signals tool emission AND the
+        # parsed list is empty — strictly additive recovery.
+        if not tool_calls and finish_reason in {"tool_calls", "function_call"}:
+            raw_tcs = _raw_tool_calls_from_response(response)
+            if raw_tcs:
+                recovered: list[ToolCall] = []
+                for raw_tc in raw_tcs:
+                    tc_norm = _normalize_raw_tool_call(raw_tc)
+                    if tc_norm is not None:
+                        recovered.append(tc_norm)
+                if recovered:
+                    tool_calls = recovered
 
         usage = None
         if hasattr(response, "usage") and response.usage:
