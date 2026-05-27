@@ -12,11 +12,30 @@ reasoning configuration, temperature handling, and extra_body assembly.
 import copy
 import logging
 import os
+import sys
 from typing import Any, Dict, List, Optional
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 
 logger = logging.getLogger(__name__)
+
+
+def _diag(message: str) -> None:
+    """hermes-agent#133 — write a diagnostic line directly to stderr.
+
+    Operators reported that ``logger.warning(...)`` calls from
+    normalize_response didn't appear in ``2>&1 | tee`` captures —
+    likely because hermes' logging config routes that logger to a
+    file or null handler under certain invocation modes. Writing
+    directly to ``sys.stderr`` bypasses any logger config + always
+    appears in stderr capture. Format prefix marks it as a
+    response-shape diag for easy grep.
+    """
+    try:
+        sys.stderr.write(f"[hermes-diag] {message}\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
@@ -716,16 +735,18 @@ class ChatCompletionsTransport(ProviderTransport):
         carrying the envelope in ``provider_data["cascade_exhausted"]``.
         Callers (conversation_loop) check this and skip the retry path.
         """
-        # hermes-agent#133 — granular entry-shape diagnostic so
-        # operators can pinpoint where tool_calls disappear when
-        # dispatch fails. After v0.18.4-v0.18.6 the recovery chain
-        # is layered (SDK loose-coerce → in-loop normalize → raw
-        # fallback), and the user-visible "tool_calls dropped"
-        # symptom may originate at any layer.
+        # hermes-agent#133 — granular entry-shape diagnostic written
+        # directly to stderr via ``_diag`` so it always appears in
+        # ``2>&1`` captures regardless of logger config. After
+        # v0.18.4-v0.18.6 the recovery chain is layered (SDK loose-
+        # coerce → in-loop normalize → raw fallback), and the
+        # user-visible "tool_calls dropped" symptom may originate
+        # at any layer.
         try:
             _sdk_tc_count = 0
             _sdk_content_len = 0
             _sdk_fr = "?"
+            _sdk_tc_shapes: list[str] = []
             try:
                 _ch0 = response.choices[0]
                 _sdk_fr = _ch0.finish_reason or "stop"
@@ -733,12 +754,25 @@ class ChatCompletionsTransport(ProviderTransport):
                 _sdk_content_len = len(_sdk_msg.content or "")
                 _sdk_tc = _sdk_msg.tool_calls or []
                 _sdk_tc_count = len(_sdk_tc) if _sdk_tc else 0
+                # Per-tool-call shape — names + ids confirm what
+                # actually arrived at this layer.
+                for _tc in _sdk_tc[:3]:
+                    try:
+                        _name = getattr(getattr(_tc, "function", None),
+                                        "name", "?")
+                        _tcid = getattr(_tc, "id", "?")
+                        _ttype = getattr(_tc, "type", "?")
+                        _sdk_tc_shapes.append(
+                            f"{_name}:{_tcid}:type={_ttype}")
+                    except Exception:  # noqa: BLE001
+                        _sdk_tc_shapes.append("<unreadable>")
             except Exception:  # noqa: BLE001
                 pass
-            logger.warning(
-                "normalize_response entry: sdk_tool_calls=%d "
-                "content_len=%d finish_reason=%r",
-                _sdk_tc_count, _sdk_content_len, _sdk_fr,
+            _diag(
+                f"normalize_response entry: sdk_tool_calls="
+                f"{_sdk_tc_count} content_len={_sdk_content_len} "
+                f"finish_reason={_sdk_fr!r} "
+                f"shapes={_sdk_tc_shapes}"
             )
         except Exception:  # noqa: BLE001
             pass
@@ -816,11 +850,10 @@ class ChatCompletionsTransport(ProviderTransport):
         if not tool_calls:
             raw_tcs = _raw_tool_calls_from_response(response)
             # hermes-agent#133 — recovery-branch instrumentation
-            logger.warning(
-                "normalize_response: sdk_tool_calls empty; raw_tcs "
-                "found=%d (recovery %s)",
-                len(raw_tcs),
-                "fires" if raw_tcs else "skipped (no raw tcs)",
+            _diag(
+                f"normalize_response recovery: sdk_tool_calls empty; "
+                f"raw_tcs found={len(raw_tcs)} "
+                f"({'fires' if raw_tcs else 'skipped (no raw tcs)'})"
             )
             if raw_tcs:
                 recovered: list[ToolCall] = []
@@ -844,11 +877,11 @@ class ChatCompletionsTransport(ProviderTransport):
         # was >0 at entry, the loop dropped them (a different bug
         # than the recovery path).
         try:
-            logger.warning(
-                "normalize_response exit: tool_calls=%d finish_reason=%r "
-                "content_len=%d",
-                len(tool_calls or []), finish_reason,
-                len(msg.content or "") if hasattr(msg, "content") else 0,
+            _diag(
+                f"normalize_response exit: tool_calls="
+                f"{len(tool_calls or [])} finish_reason="
+                f"{finish_reason!r} content_len="
+                f"{len(msg.content or '') if hasattr(msg, 'content') else 0}"
             )
         except Exception:  # noqa: BLE001
             pass
