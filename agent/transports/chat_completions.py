@@ -36,6 +36,94 @@ def _diag(message: str) -> None:
         sys.stderr.flush()
     except Exception:  # noqa: BLE001
         pass
+
+
+# hermes-agent#138 — capture the RAW response dict the SDK received
+# from the wire, BEFORE construct_type / validate_type parses it.
+# This isolates whether (a) the wire-level response actually carries
+# tool_calls (server side correct) or (b) the SDK's parser drops
+# them silently (SDK bug).
+#
+# v0.18.8 confirmed the post-parse view shows sdk_tool_calls=0 even
+# when devagentic-side logs prove the wire shape was 2 tool_calls.
+# Monkey-patching ``_process_response_data`` is the cleanest hook
+# point: covers every OpenAI client construction in hermes (~15
+# sites in auxiliary_client.py + main agent path) without changing
+# any call signature.
+_RAW_CAPTURE_INSTALLED = False
+
+
+def _install_sdk_raw_capture() -> None:
+    """Install a one-time monkey-patch on the OpenAI SDK's
+    ``_process_response_data`` that logs the raw response dict for
+    chat-completion calls before the SDK validates/strips fields.
+
+    Idempotent — safe to call multiple times. Fail-soft on any
+    import / attribute error so the production path never breaks
+    even if the SDK internals change.
+    """
+    global _RAW_CAPTURE_INSTALLED
+    if _RAW_CAPTURE_INSTALLED:
+        return
+    try:
+        from openai._base_client import SyncAPIClient, AsyncAPIClient
+    except Exception:  # noqa: BLE001
+        return
+
+    def _wrap_process(cls):
+        orig = cls._process_response_data
+
+        def _patched(self, *, data, cast_to, response):
+            # Pre-parse log: dump the raw data dict shape for
+            # chat-completion responses. Skip non-dict data + cap
+            # the dump at 4KB to keep stderr readable.
+            try:
+                cast_name = getattr(cast_to, "__name__", "?")
+                if (isinstance(data, dict)
+                        and "choices" in data
+                        and "ChatCompletion" in cast_name):
+                    import json as _json
+                    raw_text = _json.dumps(data, default=str)[:4000]
+                    # Per-choice summary so the operator can scan
+                    # without parsing the full dump.
+                    choices = data.get("choices") or []
+                    summary_lines: list[str] = []
+                    for i, ch in enumerate(choices[:3]):
+                        if not isinstance(ch, dict):
+                            continue
+                        msg = ch.get("message") or {}
+                        tcs = (msg.get("tool_calls") or []
+                               if isinstance(msg, dict) else [])
+                        summary_lines.append(
+                            f"choice[{i}]: finish_reason="
+                            f"{ch.get('finish_reason')!r} "
+                            f"content_len="
+                            f"{len((msg.get('content') if isinstance(msg, dict) else '') or '')} "
+                            f"tool_calls_count={len(tcs)}"
+                        )
+                    _diag(
+                        f"sdk RAW pre-parse ({cast_name}): "
+                        + " | ".join(summary_lines)
+                    )
+                    _diag(f"sdk RAW body[:4000]: {raw_text}")
+            except Exception:  # noqa: BLE001
+                pass
+            return orig(self, data=data, cast_to=cast_to, response=response)
+
+        cls._process_response_data = _patched
+
+    try:
+        _wrap_process(SyncAPIClient)
+        _wrap_process(AsyncAPIClient)
+        _RAW_CAPTURE_INSTALLED = True
+        _diag("sdk-raw-capture installed (hermes-agent#138)")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# Install at module import — covers every OpenAI() construction
+# in hermes (auxiliary_client + agent path + auxiliary tasks).
+_install_sdk_raw_capture()
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
