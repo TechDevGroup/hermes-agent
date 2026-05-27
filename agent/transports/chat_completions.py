@@ -761,16 +761,29 @@ class ChatCompletionsTransport(ProviderTransport):
                     )
                 )
 
-        # hermes-agent#121: when the SDK's strict Pydantic validation
-        # dropped tool_call entries that omitted the OpenAI-spec-
-        # required ``type`` field (mistral-large emits this shape),
-        # ``msg.tool_calls`` reaches us empty even though the wire
-        # response carried tool_calls. Recover them from the raw
-        # response dict; default missing ``type`` to ``"function"``
-        # (the only valid value per spec). Only fires when the
-        # finish_reason explicitly signals tool emission AND the
-        # parsed list is empty — strictly additive recovery.
-        if not tool_calls and finish_reason in {"tool_calls", "function_call"}:
+        # hermes-agent#121 / #124: when the SDK's strict Pydantic
+        # validation dropped tool_call entries that omitted the
+        # OpenAI-spec-required ``type`` field (mistral-large emits
+        # this shape), ``msg.tool_calls`` reaches us empty even
+        # though the wire response carried tool_calls. Worse:
+        # the SDK may ALSO normalize the finish_reason away from
+        # ``tool_calls`` when it strips the tool_call entries, so
+        # we cannot gate on the parsed finish_reason. Recover
+        # unconditionally when the SDK has empty tool_calls but
+        # the raw response shape carries them — default missing
+        # ``type`` to ``"function"`` (only valid value per spec).
+        #
+        # If the recovery finds raw tool_calls, also normalize the
+        # finish_reason to ``tool_calls`` so downstream consumers
+        # (conversation_loop.py:3180 ``if assistant_message.tool_calls``,
+        # structural-empty recovery #67, the #99 finish-reason
+        # recovery) all see a consistent state: tool_calls
+        # populated AND finish_reason=tool_calls. Without the
+        # finish_reason fix, the structural-empty recovery
+        # (gated on finish_reason==stop) was still firing
+        # spuriously because the SDK normalized the stripped-
+        # tool_call response's finish_reason to stop.
+        if not tool_calls:
             raw_tcs = _raw_tool_calls_from_response(response)
             if raw_tcs:
                 recovered: list[ToolCall] = []
@@ -780,6 +793,13 @@ class ChatCompletionsTransport(ProviderTransport):
                         recovered.append(tc_norm)
                 if recovered:
                     tool_calls = recovered
+                    # Force finish_reason to ``tool_calls`` so the
+                    # downstream tool-branch check fires correctly.
+                    # SDK-supplied finish_reason here was either
+                    # already ``tool_calls`` (no-op) or stripped to
+                    # ``stop`` after the tool_call entry was dropped
+                    # by strict validation.
+                    finish_reason = "tool_calls"
 
         usage = None
         if hasattr(response, "usage") and response.usage:
