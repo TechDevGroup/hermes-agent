@@ -42,6 +42,59 @@ def _resolve_tool_use_enforcement() -> Optional[str]:
     return raw if raw in _TOOL_USE_REQUIRED_VALUES else None
 
 
+# Issue #118 — companion to devagentic#324 (server-side recovery
+# cascade). Devagentic emits HTTP 200 with an error envelope of the
+# shape ``{"error": {"message": ..., "code": "devagentic_cascade_exhausted",
+# "devagentic": {"trace_id": ..., "steps_attempted": [...],
+# "terminal_outcome": ...}}}`` when its 4-step recovery cascade fails.
+# Hermes must NOT retry on this — devagentic already walked 4
+# alternates inside its own cascade; another 3 hermes retries would
+# stack 3 × 4 = 12 dispatches per user request (rate-budget blowout
+# per devagentic#321).
+CASCADE_EXHAUSTED_CODE = "devagentic_cascade_exhausted"
+
+
+def _extract_cascade_exhausted(response: Any) -> Optional[Dict[str, Any]]:
+    """Detect the ``devagentic_cascade_exhausted`` sentinel on a
+    chat-completion response.
+
+    Returns the error envelope dict when present (caller surfaces
+    the ``trace_id`` + ``terminal_outcome`` to the user), else
+    ``None``. Inspection order mirrors how OpenAI-SDK might park an
+    unknown top-level field (Pydantic v2 ``model_extra``, plain
+    attribute, ``__dict__``) so different SDK versions all surface
+    the sentinel without hand-wiring per shape.
+
+    Fail-soft on attribute errors — a malformed or non-dict
+    ``error`` value collapses to None so the runtime falls back to
+    the existing empty-retry path.
+    """
+    if response is None:
+        return None
+    err: Any = None
+    try:
+        err = getattr(response, "error", None)
+    except Exception:  # noqa: BLE001
+        err = None
+    if err is None:
+        # Pydantic v2 stores unknown fields in model_extra; check
+        # there as a secondary path.
+        try:
+            extra = getattr(response, "model_extra", None)
+            if isinstance(extra, dict):
+                err = extra.get("error")
+        except Exception:  # noqa: BLE001
+            err = None
+    if err is None and isinstance(response, dict):
+        err = response.get("error")
+    if not isinstance(err, dict):
+        return None
+    code = err.get("code")
+    if code == CASCADE_EXHAUSTED_CODE:
+        return err
+    return None
+
+
 def _maybe_inject_required_tool_choice(
     api_kwargs: Dict[str, Any], tools: Any,
 ) -> None:
@@ -566,7 +619,29 @@ class ChatCompletionsTransport(ProviderTransport):
         is preserved via ToolCall.provider_data.  reasoning_details (OpenRouter
         unified format) and reasoning_content (DeepSeek/Moonshot) are also
         preserved for downstream replay.
+
+        Issue #118: when devagentic-local returns the
+        ``devagentic_cascade_exhausted`` sentinel (HTTP 200 with an
+        error envelope + no choices), short-circuit to a NormalizedResponse
+        carrying the envelope in ``provider_data["cascade_exhausted"]``.
+        Callers (conversation_loop) check this and skip the retry path.
         """
+        cascade_err = _extract_cascade_exhausted(response)
+        if cascade_err is not None:
+            # No choices to normalize — return a sentinel-bearing
+            # NormalizedResponse. ``content`` carries the human-
+            # readable error message so chat surfaces show something
+            # useful even if the caller doesn't unpack provider_data.
+            return NormalizedResponse(
+                content=str(cascade_err.get("message") or
+                            "devagentic cascade exhausted"),
+                tool_calls=None,
+                finish_reason="stop",
+                reasoning=None,
+                usage=None,
+                provider_data={"cascade_exhausted": cascade_err},
+            )
+
         choice = response.choices[0]
         msg = choice.message
         finish_reason = choice.finish_reason or "stop"
