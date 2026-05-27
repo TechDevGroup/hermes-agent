@@ -3512,6 +3512,52 @@ def run_conversation(
                 # final response path.
                 agent._mute_post_response = False
 
+                # hermes-agent#118: devagentic-side cascade exhausted.
+                # Devagentic's 4-step recovery cascade (devagentic#324)
+                # already walked alternates and surrendered — retrying
+                # here would stack hermes' 3 retries on top of that, for
+                # 3×4=12 dispatches per user request (rate-budget blowout
+                # per devagentic#321). Treat as terminal + surface the
+                # trace_id so post-mortem is a single ``dispatchTrace``
+                # GraphQL call.
+                _pd = getattr(assistant_message, "provider_data", None) or {}
+                _cascade_err = (
+                    _pd.get("cascade_exhausted")
+                    if isinstance(_pd, dict) else None
+                )
+                if _cascade_err:
+                    _dvg = _cascade_err.get("devagentic") or {}
+                    _trace_id = _dvg.get("trace_id", "?")
+                    _terminal = _dvg.get("terminal_outcome", "?")
+                    _err_msg = (
+                        _cascade_err.get("message")
+                        or "devagentic cascade exhausted"
+                    )
+                    logger.warning(
+                        "Devagentic cascade exhausted (no retry) — "
+                        "trace_id=%s terminal_outcome=%s message=%r",
+                        _trace_id, _terminal, _err_msg,
+                    )
+                    agent._emit_status(
+                        f"⛔ Devagentic cascade exhausted "
+                        f"(trace_id={_trace_id}): {_err_msg}"
+                    )
+                    _turn_exit_reason = "devagentic_cascade_exhausted"
+                    assistant_msg = agent._build_assistant_message(
+                        assistant_message, finish_reason)
+                    assistant_msg["content"] = (
+                        f"⛔ Devagentic cascade exhausted. "
+                        f"trace_id={_trace_id}, "
+                        f"terminal_outcome={_terminal}. "
+                        f"Post-mortem: dispatchTrace("
+                        f"trace_id={_trace_id!r}). "
+                        f"{_err_msg}"
+                    )
+                    assistant_msg["_empty_terminal_sentinel"] = True
+                    messages.append(assistant_msg)
+                    final_response = assistant_msg["content"]
+                    break
+
                 # hermes-agent#99: model emitted a tool-call finish reason
                 # but the normalized tool_calls list reached us empty —
                 # an SDK normalization gap between raw response shape and
