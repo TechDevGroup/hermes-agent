@@ -229,16 +229,28 @@ def test_normalize_recovers_mistral_shaped_tool_calls():
     assert norm.tool_calls[0].id == "5oTo1Uia0"
 
 
-def test_normalize_does_not_fall_back_on_stop_finish_reason():
-    """When finish_reason is stop (not tool_calls), the recovery
-    branch shouldn't fire — that's the #67 structural-empty case,
-    not a tool-call SDK gap."""
+def test_normalize_recovers_when_sdk_normalized_finish_reason_to_stop():
+    """hermes-agent#124 — when the SDK strips the type-less tool_call
+    entry, it may ALSO normalize finish_reason from ``tool_calls``
+    to ``stop``. Recovery must still fire in this case (raw shape
+    is the authoritative signal), AND finish_reason must be
+    rewritten back to ``tool_calls`` so the downstream tool-branch
+    check fires correctly.
+
+    Without this, structural-empty recovery (#67) was spuriously
+    firing on stripped-mistral-tool-call responses — what looked
+    to hermes like ``finish_reason=stop + tool_calls=[]`` (since
+    SDK gutted both) was actually a valid tool_call emission on
+    the wire."""
     transport = ChatCompletionsTransport()
     resp = _mistral_shaped_response(finish_reason="stop")
     norm = transport.normalize_response(resp)
-    # Empty tool_calls + stop → no recovery here. (#67/#108 path
-    # handles upstream in conversation_loop.)
-    assert norm.tool_calls is None or norm.tool_calls == []
+    # Recovery fires — tool_calls populated AND finish_reason
+    # bumped to ``tool_calls`` for downstream consistency.
+    assert norm.tool_calls is not None
+    assert len(norm.tool_calls) == 1
+    assert norm.tool_calls[0].name == "write_file"
+    assert norm.finish_reason == "tool_calls"
 
 
 def test_normalize_does_not_double_up_when_sdk_already_parsed():
