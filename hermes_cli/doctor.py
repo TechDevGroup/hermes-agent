@@ -814,6 +814,47 @@ def _check_persona_deferred_env() -> None:
         )
 
 
+def _check_tool_use_enforcement_env() -> None:
+    """Surface ``HERMES_TOOL_USE_ENFORCEMENT`` (#115) when set.
+    Silent when unset/empty.
+
+    When set to ``required``, every chat.completions dispatch where
+    tools are attached is forced to ``tool_choice: "required"`` —
+    the model-layer enforcement companion to devagentic#315's
+    initiative-preamble (preamble-layer) signal.
+
+    Surfaces:
+      * ``check_ok`` when set to ``required``
+      * ``check_warn`` when set to anything else (only ``required``
+        is currently recognized; runtime treats unknown values as
+        off, so the warn flags the typo at boot)
+    """
+    try:
+        from agent.transports.chat_completions import (
+            TOOL_USE_ENFORCEMENT_ENV as _ENV,
+            _TOOL_USE_REQUIRED_VALUES,
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+    raw = os.environ.get(_ENV, "").strip()
+    if not raw:
+        return
+
+    _section("Tool-use enforcement (#115)")
+    if raw.lower() in _TOOL_USE_REQUIRED_VALUES:
+        check_ok(
+            f"{_ENV}={raw!r}",
+            "(tool_choice='required' on every dispatch with tools)",
+        )
+    else:
+        sample = ", ".join(sorted(_TOOL_USE_REQUIRED_VALUES))
+        check_warn(
+            f"{_ENV}={raw!r} is not a known value",
+            f"(valid: {sample}; runtime treats unknown as off)",
+        )
+
+
 def _check_tools_subset_env() -> None:
     """Surface the active ``HERMES_TOOLS_SUBSET`` (#75/#87) when set.
 
@@ -2588,6 +2629,7 @@ def run_doctor(args):
     _check_tools_subset_env()
     _check_intent_override_env()
     _check_persona_deferred_env()
+    _check_tool_use_enforcement_env()
 
     try:
         from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
