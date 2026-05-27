@@ -3830,6 +3830,34 @@ def run_conversation(
                     _tools_attached = bool(
                         getattr(agent, "tools", None)
                     )
+                    # hermes-agent#133 entry-point diagnostic — stderr-
+                    # direct so it always appears in 2>&1 captures.
+                    # If we reach this point, the else branch was
+                    # taken at line 3504, meaning the line-3180 gate
+                    # treated assistant_message.tool_calls as falsy.
+                    # Show what the loop SEES so operators can confirm
+                    # whether the codestral perfect-shape response
+                    # was correctly parsed (tool_calls populated) OR
+                    # silently dropped before line 3180.
+                    try:
+                        import sys as _sys
+                        _final_tc_count = len(
+                            getattr(assistant_message, "tool_calls",
+                                    None) or [])
+                        _sys.stderr.write(
+                            f"[hermes-diag] conv-loop empty-check: "
+                            f"assistant.tool_calls={_final_tc_count} "
+                            f"finish_reason={finish_reason!r} "
+                            f"truly_empty={_truly_empty} "
+                            f"has_structured={_has_structured} "
+                            f"tools_attached={_tools_attached} "
+                            f"prior_was_tool={_prior_was_tool} "
+                            f"model={getattr(agent, 'model', '?')}\n"
+                        )
+                        _sys.stderr.flush()
+                    except Exception:  # noqa: BLE001
+                        pass
+
                     _structural_empty = (
                         _truly_empty
                         and not _has_structured
