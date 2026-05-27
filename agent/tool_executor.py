@@ -473,6 +473,29 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
+    # hermes-agent#130 — loud entry diagnostic. After v0.18.4/v0.18.5
+    # closed the response-handler robustness wave, a residual class
+    # surfaced where tool_calls were correctly parsed + validated
+    # but the side-effect never materialized (user saw model
+    # narration claiming completion; checked filesystem; file
+    # missing). Operators couldn't tell whether (a) the dispatch
+    # reached the handler, (b) the handler ran but returned an
+    # error, or (c) a guardrail / sandbox routed the write
+    # elsewhere. This emits a WARN-equivalent log at entry +
+    # per-tool so the entire dispatch path is visible without
+    # ``-v``.
+    _tc_count = len(assistant_message.tool_calls or [])
+    _tc_names = [
+        getattr(getattr(tc, "function", tc), "name", "?")
+        for tc in (assistant_message.tool_calls or [])
+    ]
+    logger.warning(
+        "execute_tool_calls_sequential: dispatching %d tool_call(s) "
+        "%s (task_id=%s api_call=%d model=%s provider=%s)",
+        _tc_count, _tc_names, effective_task_id, api_call_count,
+        getattr(agent, "model", "?"),
+        getattr(agent, "provider", "?"),
+    )
     for i, tool_call in enumerate(assistant_message.tool_calls, 1):
         # SAFETY: check interrupt BEFORE starting each tool.
         # If the user sent "stop" during a previous tool's execution,
@@ -782,6 +805,27 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 function_result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
             tool_duration = time.time() - tool_start_time
+
+        # hermes-agent#130 — loud post-dispatch diagnostic. Per-tool
+        # result preview so the operator can correlate the model's
+        # narration with the actual handler outcome. Catches the
+        # "tool ran, returned a sandbox-internal path" + "tool ran,
+        # returned a permission error swallowed by stream" classes
+        # without requiring -v. _execution_blocked path also surfaces
+        # so guardrail / pre-hook blocks are visible.
+        try:
+            _result_str = function_result if isinstance(
+                function_result, str) else str(function_result)
+            _result_preview = (_result_str[:180]
+                               + ("…" if len(_result_str) > 180 else ""))
+            logger.warning(
+                "tool_call dispatched: name=%s task_id=%s "
+                "blocked=%s duration=%.2fs result_preview=%r",
+                function_name, effective_task_id,
+                _execution_blocked, tool_duration, _result_preview,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         if isinstance(function_result, str):
             result_preview = function_result if agent.verbose_logging else (
