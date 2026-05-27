@@ -10,6 +10,7 @@ reasoning configuration, temperature handling, and extra_body assembly.
 """
 
 import copy
+import os
 from typing import Any, Dict, List, Optional
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
@@ -17,6 +18,49 @@ from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
+
+
+# Issue #115 — companion to devagentic#315 (initiative preamble).
+# When set to ``required`` (the only currently-recognized value),
+# every chat.completions.create() call where tools are attached is
+# forced to ``tool_choice: "required"`` — closing the model-layer
+# enforcement gap that the devagentic-side preamble's soft signal
+# leaves open. Operator-controlled per session via env var; default
+# behavior unchanged.
+TOOL_USE_ENFORCEMENT_ENV = "HERMES_TOOL_USE_ENFORCEMENT"
+_TOOL_USE_REQUIRED_VALUES = frozenset({"required"})
+
+
+def _resolve_tool_use_enforcement() -> Optional[str]:
+    """Return the active ``HERMES_TOOL_USE_ENFORCEMENT`` value when
+    set to a recognized value, else ``None``. Unknown values fall
+    through to None (doctor probe surfaces the typo separately so
+    the runtime doesn't silently misbehave)."""
+    raw = os.environ.get(TOOL_USE_ENFORCEMENT_ENV, "").strip().lower()
+    if not raw:
+        return None
+    return raw if raw in _TOOL_USE_REQUIRED_VALUES else None
+
+
+def _maybe_inject_required_tool_choice(
+    api_kwargs: Dict[str, Any], tools: Any,
+) -> None:
+    """Inject ``tool_choice: "required"`` into ``api_kwargs`` in
+    place when (a) tools are attached and (b)
+    ``HERMES_TOOL_USE_ENFORCEMENT=required`` is set.
+
+    Does NOT override a caller-supplied ``tool_choice`` already on
+    api_kwargs — the operator-set env is a default, not a clobber.
+    Per devagentic#203 §1.3, session-tier defaults compose with
+    dispatcher-tier role overrides; this respects that contract.
+    """
+    if not tools:
+        return
+    if api_kwargs.get("tool_choice") is not None:
+        return  # caller already set it — don't clobber
+    enforcement = _resolve_tool_use_enforcement()
+    if enforcement == "required":
+        api_kwargs["tool_choice"] = "required"
 
 
 def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
@@ -251,6 +295,10 @@ class ChatCompletionsTransport(ProviderTransport):
                 tools = sanitize_moonshot_tools(tools)
             api_kwargs["tools"] = tools
 
+        # Issue #115: operator-set HERMES_TOOL_USE_ENFORCEMENT=required
+        # forces tool_choice on every dispatch where tools are attached.
+        _maybe_inject_required_tool_choice(api_kwargs, tools)
+
         # max_tokens resolution — priority: ephemeral > user > provider default
         max_tokens_fn = params.get("max_tokens_param_fn")
         ephemeral = params.get("ephemeral_max_output_tokens")
@@ -438,6 +486,10 @@ class ChatCompletionsTransport(ProviderTransport):
             if is_moonshot_model(model):
                 tools = sanitize_moonshot_tools(tools)
             api_kwargs["tools"] = tools
+
+        # Issue #115: operator-set HERMES_TOOL_USE_ENFORCEMENT=required
+        # forces tool_choice on every dispatch where tools are attached.
+        _maybe_inject_required_tool_choice(api_kwargs, tools)
 
         # max_tokens resolution — priority: ephemeral > user > profile default
         max_tokens_fn = params.get("max_tokens_param_fn")
