@@ -3830,31 +3830,33 @@ def run_conversation(
                     _tools_attached = bool(
                         getattr(agent, "tools", None)
                     )
-                    # hermes-agent#133 entry-point diagnostic — stderr-
-                    # direct so it always appears in 2>&1 captures.
-                    # If we reach this point, the else branch was
-                    # taken at line 3504, meaning the line-3180 gate
-                    # treated assistant_message.tool_calls as falsy.
-                    # Show what the loop SEES so operators can confirm
-                    # whether the codestral perfect-shape response
-                    # was correctly parsed (tool_calls populated) OR
-                    # silently dropped before line 3180.
+                    # hermes-agent#133/#140 entry-point diagnostic —
+                    # stderr-direct, env-gated via
+                    # ``HERMES_DIAG_RAW_CAPTURE``. Default OFF so
+                    # interactive sandboxes don't get flooded with
+                    # 4+ lines per dispatch. Operators opt in to
+                    # capture the per-response shape when isolating
+                    # bugs like #133 (devagentic streaming chunker).
                     try:
-                        import sys as _sys
-                        _final_tc_count = len(
-                            getattr(assistant_message, "tool_calls",
-                                    None) or [])
-                        _sys.stderr.write(
-                            f"[hermes-diag] conv-loop empty-check: "
-                            f"assistant.tool_calls={_final_tc_count} "
-                            f"finish_reason={finish_reason!r} "
-                            f"truly_empty={_truly_empty} "
-                            f"has_structured={_has_structured} "
-                            f"tools_attached={_tools_attached} "
-                            f"prior_was_tool={_prior_was_tool} "
-                            f"model={getattr(agent, 'model', '?')}\n"
+                        from agent.transports.chat_completions import (
+                            _diag_enabled as _diag_on,
                         )
-                        _sys.stderr.flush()
+                        if _diag_on():
+                            import sys as _sys
+                            _final_tc_count = len(
+                                getattr(assistant_message, "tool_calls",
+                                        None) or [])
+                            _sys.stderr.write(
+                                f"[hermes-diag] conv-loop empty-check: "
+                                f"assistant.tool_calls={_final_tc_count} "
+                                f"finish_reason={finish_reason!r} "
+                                f"truly_empty={_truly_empty} "
+                                f"has_structured={_has_structured} "
+                                f"tools_attached={_tools_attached} "
+                                f"prior_was_tool={_prior_was_tool} "
+                                f"model={getattr(agent, 'model', '?')}\n"
+                            )
+                            _sys.stderr.flush()
                     except Exception:  # noqa: BLE001
                         pass
 

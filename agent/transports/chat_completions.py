@@ -20,17 +20,34 @@ from agent.lmstudio_reasoning import resolve_lmstudio_effort
 logger = logging.getLogger(__name__)
 
 
-def _diag(message: str) -> None:
-    """hermes-agent#133 — write a diagnostic line directly to stderr.
+DIAG_RAW_CAPTURE_ENV = "HERMES_DIAG_RAW_CAPTURE"
+_DIAG_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-    Operators reported that ``logger.warning(...)`` calls from
-    normalize_response didn't appear in ``2>&1 | tee`` captures —
-    likely because hermes' logging config routes that logger to a
-    file or null handler under certain invocation modes. Writing
-    directly to ``sys.stderr`` bypasses any logger config + always
-    appears in stderr capture. Format prefix marks it as a
-    response-shape diag for easy grep.
+
+def _diag_enabled() -> bool:
+    """Return True iff ``HERMES_DIAG_RAW_CAPTURE`` is set to a truthy
+    value. Default OFF — the response-shape + SDK raw-capture
+    diagnostics flood the user-visible pane on every request (4+
+    lines per dispatch, plus a 4KB body dump). Operators opt in
+    via env for debugging. Closes hermes-agent#140.
     """
+    return (os.environ.get(DIAG_RAW_CAPTURE_ENV, "").strip().lower()
+            in _DIAG_TRUTHY)
+
+
+def _diag(message: str) -> None:
+    """hermes-agent#133/#140 — write a diagnostic line directly to
+    stderr, gated by ``HERMES_DIAG_RAW_CAPTURE`` env.
+
+    Default OFF (no output) because the per-request volume floods
+    interactive sandboxes. Operators enable for debug:
+    ``HERMES_DIAG_RAW_CAPTURE=1 hermes ...`` and the 4 diagnostic
+    lines per response appear in stderr capture. Bypasses logger
+    config (which doesn't propagate to ``2>&1 | tee`` per
+    field-observation in v0.18.7 → v0.18.8 funnel).
+    """
+    if not _diag_enabled():
+        return
     try:
         sys.stderr.write(f"[hermes-diag] {message}\n")
         sys.stderr.flush()
@@ -123,7 +140,10 @@ def _install_sdk_raw_capture() -> None:
 
 # Install at module import — covers every OpenAI() construction
 # in hermes (auxiliary_client + agent path + auxiliary tasks).
-_install_sdk_raw_capture()
+# hermes-agent#140 — gated on env so the SDK monkey-patch overhead
+# (and its per-request stderr writes) is opt-in, not the default.
+if _diag_enabled():
+    _install_sdk_raw_capture()
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
