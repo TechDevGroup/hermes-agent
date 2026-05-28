@@ -1067,7 +1067,13 @@ class ShellFileOperations(FileOperations):
         # backends don't translate, so this is a no-op there.
         _verify_stdout_normalized = verify_result.stdout.replace("\r\n", "\n").replace("\r", "\n")
         _new_content_normalized = new_content.replace("\r\n", "\n").replace("\r", "\n")
-        if _verify_stdout_normalized != _new_content_normalized:
+        # A trailing newline/whitespace-only delta is success: write paths
+        # routinely append a trailing "\n" the intended content lacked (POSIX
+        # EOF convention, cat/echo round-trips).  This verifier catches silent
+        # *persistence* failures, not byte-exact trailing whitespace — a 1-char
+        # newline delta misled the model into re-patching a correctly-written
+        # file (issue #151).  Compare with trailing whitespace stripped.
+        if _verify_stdout_normalized.rstrip() != _new_content_normalized.rstrip():
             return PatchResult(error=(
                 f"Post-write verification failed for {path}: on-disk content "
                 f"differs from intended write "

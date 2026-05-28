@@ -552,6 +552,39 @@ class TestPatchReplacePostWriteVerification:
         assert result.success is True
         assert state["content"] == "hi world\n", f"File not actually updated: {state['content']!r}"
 
+    def test_patch_replace_succeeds_when_only_trailing_newline_differs(self, mock_env):
+        """#151: a trailing-newline-only delta is success, not failure.
+
+        Repro from the build-project flail: the write path appended a
+        trailing newline the intended content lacked, so the re-read was
+        1 char longer (wrote N, read back N+1). The verifier must treat
+        a newline-only delta as success — the patch DID persist."""
+        state = {"content": "hello world\n"}
+
+        def side_effect(command, stdin_data=None, **kwargs):
+            if command.startswith("cat >"):  # write — backend appends a trailing \n
+                if stdin_data is not None:
+                    state["content"] = stdin_data + "\n"
+                return {"output": "", "returncode": 0}
+            if command.startswith("cat "):  # read (initial + verify)
+                return {"output": state["content"], "returncode": 0}
+            if command.startswith("mkdir "):
+                return {"output": "", "returncode": 0}
+            if command.startswith("wc -c"):
+                return {"output": str(len(state["content"].encode())), "returncode": 0}
+            return {"output": "", "returncode": 0}
+
+        mock_env.execute.side_effect = side_effect
+        ops = ShellFileOperations(mock_env)
+        result = ops.patch_replace("/tmp/test/a.py", "hello", "hi")
+        assert result.error is None, (
+            "Trailing-newline-only delta must report success, got error: "
+            f"{result.error}"
+        )
+        assert result.success is True
+        # On-disk content carries the extra newline the backend appended.
+        assert state["content"] == "hi world\n\n"
+
     def test_patch_replace_fails_when_verify_read_errors(self, mock_env):
         """If the verify-read step itself fails (exit code != 0), return an error."""
         call_count = {"cat": 0}
