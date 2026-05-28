@@ -772,25 +772,23 @@ def _check_intent_override_env() -> None:
 
 
 def _check_persona_deferred_env() -> None:
-    """Surface ``HERMES_DEFER_PERSONA`` (#105) when set. Silent when
-    unset/empty.
+    """Surface ``HERMES_DEFER_PERSONA`` (#105, T1 of #143).
 
-    When set, hermes-cli's system prompt drops SOUL.md +
-    DEFAULT_AGENT_IDENTITY + HERMES_AGENT_HELP / SKILLS / KANBAN /
-    SESSION_SEARCH guidance entirely — devagentic's R5 workflow-
-    preamble (or any upstream system-prompt source) becomes
-    authoritative. Surfaces:
+    Tri-state per T1 of the thin-client refactor:
 
-      * ``check_ok`` when set to a truthy value
-        (``1``/``true``/``yes``/``on``)
-      * ``check_warn`` when set to anything else (operator probably
-        meant to enable but typed the wrong value — runtime treats
-        non-truthy as off)
+    * Truthy (``1``/``true``/``yes``/``on``) → defer; check_ok
+    * Falsy (``0``/``false``/``no``/``off``) → opt-out (operator
+      wants the baked hermes persona on devagentic-local); check_info
+    * Unset/empty → silent (runtime defaults based on provider:
+      ``devagentic-local`` defers, others don't)
+    * Unknown value → check_warn (typo; runtime falls back to
+      provider default)
     """
     try:
         from agent.system_prompt import (
             DEFER_PERSONA_ENV as _ENV,
             _DEFER_PERSONA_TRUTHY,
+            _DEFER_PERSONA_FALSY,
         )
     except Exception:  # noqa: BLE001
         return
@@ -799,18 +797,29 @@ def _check_persona_deferred_env() -> None:
     if not raw:
         return
 
-    _section("Persona deference (#105)")
-    if raw.lower() in _DEFER_PERSONA_TRUTHY:
+    _section("Persona deference (#105 / T1 #143)")
+    raw_lower = raw.lower()
+    if raw_lower in _DEFER_PERSONA_TRUTHY:
         check_ok(
             f"{_ENV}={raw!r}",
             "(hermes-cli persona deferred; upstream preamble "
             "is source of truth)",
         )
+    elif raw_lower in _DEFER_PERSONA_FALSY:
+        check_info(
+            f"{_ENV}={raw!r} — explicit opt-out: hermes-cli "
+            "persona is injected even on devagentic-local "
+            "(legacy behavior).",
+        )
     else:
-        sample = ", ".join(sorted(_DEFER_PERSONA_TRUTHY))
+        truthy_sample = ", ".join(sorted(_DEFER_PERSONA_TRUTHY))
+        falsy_sample = ", ".join(sorted(_DEFER_PERSONA_FALSY))
         check_warn(
-            f"{_ENV}={raw!r} is not a truthy value",
-            f"(valid truthy: {sample}; runtime treats this as off)",
+            f"{_ENV}={raw!r} is not recognized",
+            f"(valid truthy: {truthy_sample}; valid falsy: "
+            f"{falsy_sample}; unknown values fall back to "
+            "provider default — devagentic-local defers, "
+            "others don't)",
         )
 
 

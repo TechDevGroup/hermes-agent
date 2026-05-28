@@ -96,6 +96,98 @@ def test_resolve_returns_false_for_falsy_or_unknown(monkeypatch, raw):
     assert sp_mod._resolve_persona_deferred() is False
 
 
+# ─── T1 of #143 — provider-aware default ──────────────────────
+
+def test_t1_default_flip_devagentic_local_no_env(monkeypatch):
+    """Provider=devagentic-local + env unset → defer (default-flip)."""
+    monkeypatch.delenv("HERMES_DEFER_PERSONA", raising=False)
+    agent = _FakeAgent()
+    agent.provider = "devagentic-local"
+    assert sp_mod._resolve_persona_deferred(agent) is True
+
+
+def test_t1_default_other_provider_no_env(monkeypatch):
+    """Non-devagentic-local provider + env unset → don't defer
+    (legacy behavior preserved for other providers)."""
+    monkeypatch.delenv("HERMES_DEFER_PERSONA", raising=False)
+    for prov in ("openrouter", "anthropic", "nous", "custom", ""):
+        agent = _FakeAgent()
+        agent.provider = prov
+        assert sp_mod._resolve_persona_deferred(agent) is False, (
+            f"provider={prov} should NOT default-defer")
+
+
+def test_t1_explicit_falsy_overrides_devagentic_local_default(monkeypatch):
+    """Provider=devagentic-local + explicit HERMES_DEFER_PERSONA=0
+    → don't defer. Operator opt-out wins over T1 default-flip."""
+    monkeypatch.setenv("HERMES_DEFER_PERSONA", "0")
+    agent = _FakeAgent()
+    agent.provider = "devagentic-local"
+    assert sp_mod._resolve_persona_deferred(agent) is False
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "no", "off"])
+def test_t1_explicit_falsy_values_all_opt_out(monkeypatch, falsy):
+    """All four falsy spellings opt out on devagentic-local."""
+    monkeypatch.setenv("HERMES_DEFER_PERSONA", falsy)
+    agent = _FakeAgent()
+    agent.provider = "devagentic-local"
+    assert sp_mod._resolve_persona_deferred(agent) is False
+
+
+def test_t1_explicit_truthy_unchanged_on_other_providers(monkeypatch):
+    """Provider=other + explicit HERMES_DEFER_PERSONA=1 → still
+    defer (pre-T1 behavior; explicit truthy always wins)."""
+    monkeypatch.setenv("HERMES_DEFER_PERSONA", "1")
+    agent = _FakeAgent()
+    agent.provider = "openrouter"
+    assert sp_mod._resolve_persona_deferred(agent) is True
+
+
+def test_t1_unknown_env_falls_back_to_provider_default(monkeypatch):
+    """Unknown env value (typo) → fall back to provider default.
+    Doctor probe surfaces the warn separately."""
+    monkeypatch.setenv("HERMES_DEFER_PERSONA", "maybe")
+    agent_dvg = _FakeAgent()
+    agent_dvg.provider = "devagentic-local"
+    assert sp_mod._resolve_persona_deferred(agent_dvg) is True
+
+    agent_or = _FakeAgent()
+    agent_or.provider = "openrouter"
+    assert sp_mod._resolve_persona_deferred(agent_or) is False
+
+
+def test_t1_legacy_no_agent_arg_unchanged(monkeypatch):
+    """Backward compat: callers that don't pass agent get the
+    pre-T1 behavior (False on unset, since no provider context)."""
+    monkeypatch.delenv("HERMES_DEFER_PERSONA", raising=False)
+    # No agent arg → falls through to provider="" → False
+    assert sp_mod._resolve_persona_deferred() is False
+
+
+def test_t1_end_to_end_devagentic_local_drops_soul_md(
+        monkeypatch, _stub_run_agent):
+    """End-to-end: provider=devagentic-local + no env override →
+    SOUL.md is dropped from stable layer (same shape as
+    HERMES_DEFER_PERSONA=1 case)."""
+    monkeypatch.delenv("HERMES_DEFER_PERSONA", raising=False)
+    agent = _FakeAgent(valid_tool_names={"skill_manage"})
+    agent.provider = "devagentic-local"
+    parts = sp_mod.build_system_prompt_parts(agent)
+    assert "SOUL.md content marker" not in parts["stable"]
+
+
+def test_t1_end_to_end_other_provider_keeps_soul_md(
+        monkeypatch, _stub_run_agent):
+    """End-to-end: non-devagentic-local provider + no env override →
+    SOUL.md remains (legacy behavior preserved)."""
+    monkeypatch.delenv("HERMES_DEFER_PERSONA", raising=False)
+    agent = _FakeAgent(valid_tool_names={"skill_manage"})
+    agent.provider = "openrouter"
+    parts = sp_mod.build_system_prompt_parts(agent)
+    assert "SOUL.md content marker" in parts["stable"]
+
+
 # ---------------------------------------------------------------------------
 # Narrowing — defer-persona DROPS DEFAULT_AGENT_IDENTITY (broader than code)
 # ---------------------------------------------------------------------------
