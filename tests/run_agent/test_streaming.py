@@ -273,6 +273,110 @@ class TestStreamingAccumulator:
         assert len(response.choices[0].message.tool_calls) == 1
 
 
+# ── Test: Prose-in-tool-name reclassification (#152) ─────────────────────
+
+
+class TestStreamingProseToolNameReclassification:
+    """#152: free prose misrouted into the streaming tool-call NAME channel
+    must be treated as content, not a phantom tool call.
+
+    Repro from a build-project flail (provider=devagentic-local): the model
+    streamed narrative like ``Let me check lines 175-195 specifically:`` into
+    ``delta.tool_calls[].function.name``.  The parser turned it into a tool
+    call → "Unknown tool 'Let me ...'" + "Stream stalled mid tool-call"."""
+
+    def test_is_plausible_tool_name_discriminator(self):
+        from agent.chat_completion_helpers import _is_plausible_tool_name
+        # Real identifiers pass (bare names, MCP, hyphen/dot namespacing).
+        for ok in ("read_file", "terminal", "web_search",
+                   "mcp__server__tool", "browser.click", "tool-name"):
+            assert _is_plausible_tool_name(ok), ok
+        # Narrative prose is rejected (internal whitespace / punctuation).
+        for prose in ("Let me check lines 175-195 specifically:",
+                      "Let me replace the entire script section with the corrected version:",
+                      "I'll use the terminal tool", ""):
+            assert not _is_plausible_tool_name(prose), prose
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_prose_in_tool_name_channel_becomes_content(self, mock_close, mock_create):
+        """A tool-call delta whose name is prose yields content, no tool call."""
+        from run_agent import AIAgent
+
+        prose = "Let me check lines 175-195 specifically:"
+        chunks = [
+            _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(index=0, tc_id="call_x", name=prose)
+            ]),
+            _make_stream_chunk(finish_reason="stop", model="test-model"),
+        ]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        msg = response.choices[0].message
+        assert msg.tool_calls is None, f"prose must not become a tool call, got {msg.tool_calls}"
+        assert prose in (msg.content or "")
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_real_tool_call_survives_alongside_prose(self, mock_close, mock_create):
+        """A genuine tool call interleaved with a prose-named delta is kept;
+        only the prose is diverted to content."""
+        from run_agent import AIAgent
+
+        prose = "Let me replace the entire script section with the corrected version:"
+        chunks = [
+            _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(index=0, tc_id="call_prose", name=prose)
+            ]),
+            _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(index=1, tc_id="call_real", name="terminal")
+            ]),
+            _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(index=1, arguments='{"command": "ls"}')
+            ]),
+            _make_stream_chunk(finish_reason="tool_calls"),
+        ]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        msg = response.choices[0].message
+        assert msg.tool_calls is not None and len(msg.tool_calls) == 1
+        assert msg.tool_calls[0].function.name == "terminal"
+        assert msg.tool_calls[0].function.arguments == '{"command": "ls"}'
+        assert prose in (msg.content or "")
+
+
 # ── Test: Streaming Callbacks ────────────────────────────────────────────
 
 

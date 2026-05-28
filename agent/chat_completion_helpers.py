@@ -64,6 +64,23 @@ from utils import base_url_host_matches, base_url_hostname
 logger = logging.getLogger(__name__)
 
 
+# Issue #152: a real tool name is a bare identifier (``read_file``,
+# ``mcp__server__tool``).  Some providers (devagentic-local observed) route
+# free prose emitted between/around tool calls into the streaming tool-call
+# NAME channel — e.g. ``function.name = "Let me check lines 175-195:"`` —
+# which the parser would otherwise turn into a phantom tool call that stalls
+# the stream and surfaces as "Unknown tool 'Let me ...'".  Identifier-shaped
+# names (no internal whitespace, OpenAI/MCP charset) pass; prose is treated
+# as content instead.  Genuinely-misspelled-but-identifier names still flow
+# through to the downstream invalid-tool repair path — only prose is diverted.
+_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]{1,128}")
+
+
+def _is_plausible_tool_name(name: str) -> bool:
+    """True if *name* looks like a tool identifier rather than narrative prose."""
+    return bool(name) and _TOOL_NAME_RE.fullmatch(name.strip()) is not None
+
+
 def _ra():
     """Lazy ``run_agent`` reference.
 
@@ -1426,6 +1443,29 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             # Accumulate tool call deltas — notify display on first name
             if delta and delta.tool_calls:
                 for tc_delta in delta.tool_calls:
+                    # Issue #152: reclassify prose misrouted into the tool-call
+                    # name channel as content.  A name carrying internal
+                    # whitespace/punctuation ("Let me check lines 175-195:") is
+                    # narrative, not a tool identifier — accumulating it creates
+                    # a phantom tool call that stalls the stream waiting on
+                    # arguments that never arrive.  Route it through the normal
+                    # content path so the stream flows.  (Misspelled-but-
+                    # identifier names are left alone for downstream repair.)
+                    _fn = getattr(tc_delta, "function", None)
+                    _fn_name = getattr(_fn, "name", None) if _fn is not None else None
+                    if _fn_name and not _is_plausible_tool_name(_fn_name):
+                        content_parts.append(_fn_name)
+                        if not tool_calls_acc:
+                            _fire_first_delta()
+                            agent._fire_stream_delta(_fn_name)
+                            deltas_were_sent["yes"] = True
+                        elif agent.stream_delta_callback:
+                            try:
+                                agent.stream_delta_callback(_fn_name)
+                                agent._record_streamed_assistant_text(_fn_name)
+                            except Exception:
+                                pass
+                        continue
                     raw_idx = tc_delta.index if tc_delta.index is not None else 0
                     delta_id = tc_delta.id or ""
 
