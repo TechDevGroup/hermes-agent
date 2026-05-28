@@ -107,17 +107,45 @@ def _resolve_intent_override() -> Optional[str]:
     return raw if raw in INTENT_KEYS else None
 
 
-def _resolve_persona_deferred() -> bool:
-    """Read ``HERMES_DEFER_PERSONA`` from env. Returns True iff set to
-    a truthy value (``1``/``true``/``yes``/``on``).
+_DEFER_PERSONA_FALSY = frozenset({"0", "false", "no", "off"})
 
-    Operators set this in container deployments where devagentic (or
-    another upstream preamble source) owns the identity + persona
-    surface. The hermes-side baked persona shouldn't override what
-    devagentic injected via R5 workflow-preamble lift.
+
+def _resolve_persona_deferred(agent: Any = None) -> bool:
+    """Resolve the persona-deferral state with provider-aware default.
+
+    Priority (T1 of #143 thin-client refactor):
+
+    1. **Explicit truthy env** (``1``/``true``/``yes``/``on``) →
+       ``True`` (defer; same as pre-T1 behavior).
+    2. **Explicit falsy env** (``0``/``false``/``no``/``off``) →
+       ``False`` (opt-out — operator wants the baked hermes persona
+       even on devagentic-local). New opt-out path added in T1.
+    3. **Unset / empty / unknown env** → fall back to provider
+       default:
+
+       - ``agent.provider == "devagentic-local"`` → ``True``
+         (default-flip: devagentic owns the identity surface, so
+         hermes' baked persona is auto-deferred)
+       - other providers → ``False`` (legacy behavior preserved)
+
+    The unknown-value fallback to provider-default (rather than
+    False) is intentional: the doctor probe
+    ``_check_persona_deferred_env`` already surfaces typos as
+    ``check_warn`` at boot, so the operator sees the mismatch
+    without the runtime path silently regressing.
     """
-    return (os.environ.get(DEFER_PERSONA_ENV, "").strip().lower()
-            in _DEFER_PERSONA_TRUTHY)
+    raw = os.environ.get(DEFER_PERSONA_ENV, "").strip().lower()
+    if raw in _DEFER_PERSONA_TRUTHY:
+        return True
+    if raw in _DEFER_PERSONA_FALSY:
+        return False
+    # Unset, empty, or unknown — fall back to provider default.
+    provider = ""
+    try:
+        provider = (getattr(agent, "provider", None) or "").lower()
+    except Exception:  # noqa: BLE001
+        provider = ""
+    return provider == "devagentic-local"
 
 
 def _ra():
@@ -174,7 +202,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ``DEFAULT_AGENT_IDENTITY`` itself (the "Hermes Agent by Nous
     # Research" paragraph). Composes with ``_narrow_for_code``:
     # either flag is sufficient to drop a given block.
-    _defer_persona = _resolve_persona_deferred()
+    _defer_persona = _resolve_persona_deferred(agent)
     _narrow_persona = _narrow_for_code or _defer_persona
 
     # ── Stable tier ────────────────────────────────────────────────
