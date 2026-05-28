@@ -73,6 +73,33 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+# T2 of #143 — env-gated removal of hermes-side empty-content
+# recovery. Default OFF means hermes does NOT re-prompt the model
+# with synthetic "Your previous response was empty" messages on
+# empty responses; devagentic-side cascade (#324) + runaway
+# detector (#345-348) + exec-terminus (#349-354) already cover
+# this layer with full intent / role / dispatch-trace context.
+# Operators with legacy workflows can re-enable via env.
+LEGACY_EMPTY_RECOVERY_ENV = "HERMES_LEGACY_EMPTY_RECOVERY"
+_LEGACY_RECOVERY_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _resolve_legacy_empty_recovery() -> bool:
+    """Return True iff ``HERMES_LEGACY_EMPTY_RECOVERY`` is set to a
+    truthy value.
+
+    Default OFF (returns False) — the new thin-client behavior.
+    When False, the four hermes-side empty-content recovery paths
+    short-circuit; empty responses fall through to the clean
+    ``(empty)`` terminal (or to the fallback-chain provider switch
+    if configured). Devagentic-side cascade owns the recovery layer.
+
+    When True, all four recovery paths run as before T2.
+    """
+    return (os.environ.get(LEGACY_EMPTY_RECOVERY_ENV, "").strip().lower()
+            in _LEGACY_RECOVERY_TRUTHY)
+
+
 def _diagnose_empty_response(
     *,
     assistant_message,
@@ -3595,11 +3622,19 @@ def run_conversation(
                 # tools-strip at boundary) — once that workaround lifts,
                 # this branch catches any remaining edge cases where
                 # tool_calls round-trip incorrectly.
+                # T2 of #143 — outermost gate. Default OFF skips
+                # the synthetic-recovery path entirely; empty
+                # responses fall through to the clean terminal.
+                # Devagentic-side cascade (#324) + runaway detector
+                # (#345-348) own the recovery layer now.
+                _legacy_recovery_on = _resolve_legacy_empty_recovery()
+
                 _finish_wants_tools = finish_reason in {
                     "tool_calls", "function_call"}
                 _tool_calls_absent = not (
                     getattr(assistant_message, "tool_calls", None) or [])
-                if (_finish_wants_tools
+                if (_legacy_recovery_on
+                        and _finish_wants_tools
                         and _tool_calls_absent
                         and not getattr(
                             agent, "_finish_reason_tools_handled", False)):
@@ -3730,8 +3765,14 @@ def run_conversation(
                             re.IGNORECASE,
                         )
                     )
+                    # T2 of #143 — gate the post-tool nudge.
+                    # Default OFF skips the synthetic-recovery
+                    # re-prompt; devagentic-side runaway detector
+                    # handles weak-model "empty after tool call"
+                    # cases with full intent + role context.
                     if (
-                        _prior_was_tool
+                        _legacy_recovery_on
+                        and _prior_was_tool
                         and not getattr(agent, "_post_tool_empty_retried", False)
                         and not _has_inline_thinking  # thinking model still working — let prefill handle
                     ):
@@ -3860,8 +3901,14 @@ def run_conversation(
                     except Exception:  # noqa: BLE001
                         pass
 
+                    # T2 of #143 — gate the structural-empty
+                    # recovery. Default OFF skips the
+                    # "Your previous response was empty" re-prompt
+                    # the model with a synthetic recovery user
+                    # message. devagentic-side cascade owns this.
                     _structural_empty = (
-                        _truly_empty
+                        _legacy_recovery_on
+                        and _truly_empty
                         and not _has_structured
                         and finish_reason == "stop"
                         and not _prior_was_tool
@@ -3912,7 +3959,12 @@ def run_conversation(
                         agent._save_session_log(messages)
                         continue
 
-                    if _truly_empty and (not _has_structured or _prefill_exhausted) and agent._empty_content_retries < 3:
+                    # T2 of #143 — gate the silent 3-retry loop.
+                    # Default OFF: don't retry empty responses.
+                    # devagentic-side cascade decides when to retry
+                    # via alternate-model walk; hermes does not
+                    # double-up.
+                    if _legacy_recovery_on and _truly_empty and (not _has_structured or _prefill_exhausted) and agent._empty_content_retries < 3:
                         agent._empty_content_retries += 1
                         # hermes-agent#67 diagnostics: enrich the empty-response
                         # log with response-shape context so operators can tell
