@@ -814,10 +814,35 @@ def init_agent(
             print(f"🔄 Fallback chain ({len(agent._fallback_chain)} providers): " +
                   " → ".join(f"{f['model']} ({f['provider']})" for f in agent._fallback_chain))
 
+    # T3 of #143 — thin-client refactor: when the provider is
+    # ``devagentic-local``, augment disabled_toolsets with ``clarify``.
+    # Devagentic-side intent classifier knows when clarification is
+    # actually needed and surfaces it via OpenAI-shaped assistant
+    # messages; hermes does not need to own the modal UX. Operator
+    # can re-enable explicitly by passing ``--enable-toolset clarify``
+    # if a legacy workflow needs it (the explicit-enable takes
+    # precedence over the implicit-disable).
+    _effective_disabled = list(disabled_toolsets or [])
+    _explicit_clarify_enable = (
+        enabled_toolsets is not None
+        and "clarify" in (enabled_toolsets or [])
+    )
+    if ((agent.provider or "").lower() == "devagentic-local"
+            and not _explicit_clarify_enable
+            and "clarify" not in _effective_disabled):
+        _effective_disabled.append("clarify")
+        if not agent.quiet_mode:
+            print(
+                "🔇 T3: clarify toolset disabled by default for "
+                "provider=devagentic-local (devagentic owns "
+                "clarification UX). Re-enable with "
+                "--enable-toolset clarify if needed."
+            )
+
     # Get available tools with filtering
     agent.tools = _ra().get_tool_definitions(
         enabled_toolsets=enabled_toolsets,
-        disabled_toolsets=disabled_toolsets,
+        disabled_toolsets=_effective_disabled or None,
         quiet_mode=agent.quiet_mode,
     )
 
