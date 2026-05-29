@@ -166,12 +166,59 @@ def test_patch_landed_correctly():
     assert "HERMES_TOOLS_SUBSET" in src, "env var name absent from source"
     assert "hermes-agent#74" in src, "issue reference absent — patch missing or moved"
     assert "narrowed tool surface" in src, "narrowing log message absent"
+    # #159: the write/exec-surface-wipe warning must be wired.
+    assert "hermes-agent#159" in src, "#159 surface-wipe guard absent"
+    assert "suppressed_exec_surface" in src, "#159 helper not wired into agent_init"
     # Verify ordering: filter sits BEFORE valid_tool_names recomputation
-    # (so the recomputation reflects the filtered set).
-    filter_idx = src.find("_subset_raw = (os.environ.get(\"HERMES_TOOLS_SUBSET\")")
+    # (so the recomputation reflects the filtered set). Anchor on the post-#86
+    # get_subset_allow() call (parsing moved to hermes_cli.tool_subset).
+    filter_idx = src.find("_subset_allow = get_subset_allow()")
     valid_idx = src.find("agent.valid_tool_names = set()")
     assert filter_idx > 0 and valid_idx > 0, "anchors missing"
     assert filter_idx < valid_idx, (
         "HERMES_TOOLS_SUBSET filter must run BEFORE valid_tool_names "
         "recomputation so the validation set reflects the narrowed surface"
     )
+
+
+# ─── #159: write/exec-surface-wipe detection ─────────────────
+
+
+def test_suppressed_exec_surface_total_wipe_lists_actuators():
+    """The poly-explorer footgun: subset kept only an MCP tool, wiping the
+    whole write/exec actuator surface → returns the suppressed actuators."""
+    from hermes_cli.tool_subset import suppressed_exec_surface
+    before = {"write_file", "execute_code", "terminal", "patch", "read_file",
+              "web_search", "mcp_hermes_internal_grafted_context_fetch"}
+    kept = {"mcp_hermes_internal_grafted_context_fetch"}
+    assert suppressed_exec_surface(before, kept) == [
+        "execute_code", "patch", "terminal", "write_file"
+    ]
+
+
+def test_suppressed_exec_surface_quiet_when_actuator_survives():
+    """The legitimate sandbox profile pins the actuators → stays quiet."""
+    from hermes_cli.tool_subset import suppressed_exec_surface
+    before = {"write_file", "execute_code", "terminal", "patch", "read_file", "web_search"}
+    kept = {"execute_code", "read_file", "write_file", "patch", "terminal"}
+    assert suppressed_exec_surface(before, kept) == []
+
+
+def test_suppressed_exec_surface_quiet_when_partial_keep():
+    """Dropping terminal but keeping write_file still lets the agent act —
+    intentional narrowing stays quiet (no false alarm)."""
+    from hermes_cli.tool_subset import suppressed_exec_surface
+    assert suppressed_exec_surface({"write_file", "terminal", "read_file"},
+                                   {"write_file", "read_file"}) == []
+
+
+def test_suppressed_exec_surface_quiet_when_no_actuators_before():
+    """A read/think-only surface had no actuators to lose → quiet."""
+    from hermes_cli.tool_subset import suppressed_exec_surface
+    assert suppressed_exec_surface({"read_file", "web_search", "todo"},
+                                   {"web_search"}) == []
+
+
+def test_suppressed_exec_surface_ignores_empty_names():
+    from hermes_cli.tool_subset import suppressed_exec_surface
+    assert suppressed_exec_surface({"", "write_file"}, {""}) == ["write_file"]

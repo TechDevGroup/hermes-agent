@@ -859,21 +859,42 @@ def init_agent(
     # Empty / unset env preserves current behavior. Names not present
     # in the underlying registry are silently ignored (plugins can add/
     # remove tools at runtime; pre-validation would over-warn).
-    from hermes_cli.tool_subset import get_subset_allow, is_tool_allowed
+    from hermes_cli.tool_subset import (
+        get_subset_allow,
+        is_tool_allowed,
+        suppressed_exec_surface,
+    )
     _subset_allow = get_subset_allow()
     if _subset_allow is not None and agent.tools:
         _before = len(agent.tools)
+        _before_names = {(t.get("function") or {}).get("name", "") for t in agent.tools}
         agent.tools = [
             t for t in agent.tools
             if is_tool_allowed(
                 (t.get("function") or {}).get("name", ""), _subset_allow
             )
         ]
+        _kept_names = {(t.get("function") or {}).get("name", "") for t in agent.tools}
+        # hermes-agent#159 — make a write/exec-surface-wiping subset LOUD even
+        # in quiet_mode. A stray/inherited HERMES_TOOLS_SUBSET silently
+        # collapsed a vertical's whole actuator surface to one non-actionable
+        # tool, surfacing only as "Unknown tool 'write_file' — not in 1
+        # registered tools". Warn (don't refuse — the subset is a legitimate
+        # operator control); the footgun is the silence. logger.warning lands
+        # in the logs every vertical captures, regardless of quiet_mode.
+        _wiped_exec = suppressed_exec_surface(_before_names, _kept_names)
+        if _wiped_exec:
+            logger.warning(
+                "HERMES_TOOLS_SUBSET active: tool surface narrowed %d -> %d and "
+                "the ENTIRE write/exec surface was suppressed (%s) — the agent "
+                "can reason but not act. If unintended, unset HERMES_TOOLS_SUBSET "
+                "(a stray/inherited shell export strips the surface silently; "
+                "hermes-agent#159). Allow-list: %s",
+                _before, len(agent.tools), ", ".join(_wiped_exec),
+                ", ".join(sorted(_subset_allow)),
+            )
         if not agent.quiet_mode:
-            _kept = sorted({
-                (t.get("function") or {}).get("name", "?")
-                for t in agent.tools
-            })
+            _kept = sorted(n for n in _kept_names if n)
             print(
                 f"🎯 HERMES_TOOLS_SUBSET narrowed tool surface: "
                 f"{_before} → {len(agent.tools)} "
