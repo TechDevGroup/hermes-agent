@@ -17,6 +17,32 @@ from typing import Optional, Set
 
 ENV_VAR = "HERMES_TOOLS_SUBSET"
 
+# hermes-agent#159 — the write/exec "actuator" spine. If a subset removes the
+# whole set while the agent still has read/think tools, the agent can reason
+# but not act, and the only symptom is a cryptic "Unknown tool 'write_file' —
+# not in N registered tools". Used to make a surface-wiping subset loud at
+# startup (a stray/inherited HERMES_TOOLS_SUBSET export collapsed a vertical
+# to a single non-actionable tool — see #159).
+CORE_EXEC_TOOLS = frozenset({"write_file", "patch", "execute_code", "terminal"})
+
+
+def suppressed_exec_surface(before_names, kept_names) -> list[str]:
+    """Return the write/exec actuator tools wiped by the subset filter.
+
+    Non-empty ONLY when the subset removes the *entire* actuator surface —
+    i.e. at least one of :data:`CORE_EXEC_TOOLS` was present before the filter
+    and none survived. Returns ``[]`` when no actuators were present to begin
+    with, or when at least one survived (intentional narrowing that keeps the
+    agent able to act stays quiet — e.g. the sandbox profile pinning
+    ``execute_code,read_file,write_file,patch,terminal``). This is the
+    "can reason but not act" footgun from hermes-agent#159.
+    """
+    before = {n for n in before_names if n} & CORE_EXEC_TOOLS
+    kept = {n for n in kept_names if n} & CORE_EXEC_TOOLS
+    if before and not kept:
+        return sorted(before)
+    return []
+
 
 def get_subset_allow() -> Optional[Set[str]]:
     """Return the parsed allow-list, or ``None`` when unset/empty.
