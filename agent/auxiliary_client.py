@@ -1502,7 +1502,15 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
     if pool_present:
         or_key = explicit_api_key or _pool_runtime_api_key(entry)
         if not or_key:
-            _mark_provider_unhealthy("openrouter", ttl=60)
+            # hermes-agent#165 — pool present but the selected entry has no
+            # runtime API key. That's a credential-configuration problem,
+            # not a 402; hold the mark for the full no-credential window
+            # so we don't re-probe every minute.
+            _mark_provider_unhealthy(
+                "openrouter",
+                ttl=_AUX_NO_CREDENTIAL_TTL_SECONDS,
+                reason="OpenRouter credential pool has no runtime API key",
+            )
             return None, None
         base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
         logger.debug("Auxiliary client: OpenRouter via pool")
@@ -1511,7 +1519,14 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
 
     or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
     if not or_key:
-        _mark_provider_unhealthy("openrouter", ttl=60)
+        # hermes-agent#165 — no OPENROUTER_API_KEY anywhere. Same reasoning
+        # as the pool branch: can't fix itself without a restart, so hold
+        # the no-credential TTL instead of churning every 60s.
+        _mark_provider_unhealthy(
+            "openrouter",
+            ttl=_AUX_NO_CREDENTIAL_TTL_SECONDS,
+            reason="OPENROUTER_API_KEY not set",
+        )
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
     return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
@@ -1543,7 +1558,9 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
                 "Auxiliary: skipping Nous Portal (rate-limited, resets in %.0fs)",
                 _remaining,
             )
-            _mark_provider_unhealthy("nous", ttl=_remaining)
+            _mark_provider_unhealthy(
+                "nous", ttl=_remaining, reason="rate-limited",
+            )
             return None, None
     except Exception:
         pass
@@ -1555,7 +1572,13 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
             "Auxiliary Nous client unavailable: no Nous authentication found "
             "(run: hermes auth)."
         )
-        _mark_provider_unhealthy("nous", ttl=60)
+        # hermes-agent#165 — Nous auth isn't configured at all. Re-probing
+        # every 60s just spams; hold the no-credential TTL.
+        _mark_provider_unhealthy(
+            "nous",
+            ttl=_AUX_NO_CREDENTIAL_TTL_SECONDS,
+            reason="no Nous authentication found",
+        )
         return None, None
     if runtime is None and nous:
         # Runtime credential mint failed but stored Nous auth is still present.
@@ -2146,6 +2169,13 @@ def _get_provider_chain() -> List[tuple]:
 # the user might be running two profiles with different OpenRouter keys.
 
 _AUX_UNHEALTHY_TTL_SECONDS = 600  # 10 minutes
+# hermes-agent#165 — when an auxiliary provider is dark because credentials
+# were never configured (no OPENROUTER_API_KEY, no Nous auth), the situation
+# cannot change without a process restart. Using the short 60s/600s TTL just
+# spams the log with the same "marking unhealthy" warning every minute. Hold
+# the mark for an hour so a non-configured provider is silent for the rest
+# of the typical session, while still letting a restart re-probe quickly.
+_AUX_NO_CREDENTIAL_TTL_SECONDS = 3600  # 1 hour
 _aux_unhealthy_until: Dict[str, float] = {}
 _aux_unhealthy_logged_at: Dict[str, float] = {}
 
@@ -2174,10 +2204,21 @@ def _normalize_chain_label(provider: str) -> str:
     return _AUX_UNHEALTHY_LABEL_ALIASES.get(p, p)
 
 
-def _mark_provider_unhealthy(provider: str, ttl: Optional[float] = None) -> None:
-    """Mark ``provider`` as recently-402'd, hidden from chain iteration
+def _mark_provider_unhealthy(
+    provider: str,
+    ttl: Optional[float] = None,
+    reason: str = "payment / credit error",
+) -> None:
+    """Mark ``provider`` as recently-failed, hidden from chain iteration
     until the TTL expires. Called from the payment-fallback branches in
-    ``call_llm`` and ``acall_llm`` after a confirmed payment error.
+    ``call_llm`` and ``acall_llm`` after a confirmed payment error, and
+    from the resolver helpers for missing-credential / rate-limited cases.
+
+    ``reason`` is surfaced verbatim in the warning so the log accurately
+    reflects what actually happened — historically this said
+    "payment / credit error" regardless of cause, which made
+    no-credentials / rate-limited failures look like 402s in the operator
+    log (hermes-agent#165).
     """
     label = _normalize_chain_label(provider)
     if not label:
@@ -2185,10 +2226,11 @@ def _mark_provider_unhealthy(provider: str, ttl: Optional[float] = None) -> None
     expires_at = time.time() + (ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS)
     _aux_unhealthy_until[label] = expires_at
     logger.warning(
-        "Auxiliary: marking %s unhealthy for %ds (payment / credit error). "
+        "Auxiliary: marking %s unhealthy for %ds (%s). "
         "Subsequent auxiliary calls will skip it until %s.",
         label,
         int(ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS),
+        reason,
         time.strftime("%H:%M:%S", time.localtime(expires_at)),
     )
 
