@@ -459,14 +459,33 @@ def _run_review_in_thread(
                     "{tool_name}. Only memory/skill tools are allowed."
                 ),
             )
+            # hermes-agent#163 — front-load a strong CURATION-ONLY framing so
+            # the forked model doesn't ATTEMPT non-curation tools (which the
+            # whitelist correctly denies, but the denials generate recurring
+            # noisy 'error' lines + nudge the preflight-oracle into
+            # injecting workaround hints). The old weak trailer was easy to
+            # miss against the main turn's tool-using priming in the
+            # inherited conversation; the preamble below disarms that
+            # priming up front, names the actually-allowed tools (derived
+            # from the runtime whitelist so it stays in sync forever), and
+            # explains why anything else is rejected.
+            _allowed_list = ", ".join(sorted(review_whitelist)) or "<none>"
+            _curation_preamble = (
+                "MEMORY/SKILL CURATION PASS — this is a post-turn "
+                "reflection step. The main conversation turn above has "
+                "already completed any file edits, code changes, terminal "
+                "commands, browsing, or other side effects — there is "
+                "nothing left to write, patch, run, or fetch here. Do "
+                "NOT attempt any tool other than the curation tools "
+                "listed below; calls to anything else are rejected at "
+                "runtime, generate noisy denial errors, and do not "
+                "accomplish the goal of the pass.\n\n"
+                f"Allowed tools (whitelist enforced): {_allowed_list}\n\n"
+                "Now perform the curation task:\n\n"
+            )
             try:
                 review_agent.run_conversation(
-                    user_message=(
-                        prompt
-                        + "\n\nYou can only call memory and skill "
-                        "management tools. Other tools will be denied "
-                        "at runtime — do not attempt them."
-                    ),
+                    user_message=_curation_preamble + prompt,
                     conversation_history=messages_snapshot,
                 )
             finally:

@@ -156,3 +156,96 @@ def test_background_review_agent_tools_are_limited():
     assert "delegate_task" not in expected_tools
     assert "web_search" not in expected_tools
     assert "execute_code" not in expected_tools
+
+
+# ── hermes-agent#163: front-loaded curation-only preamble ────────────
+
+
+def test_background_review_user_message_is_front_loaded_with_curation_framing():
+    """#163: the user_message handed to the forked review agent must START
+    with the MEMORY/SKILL CURATION framing — NOT have it tacked on at the
+    end after the review body. The main turn's tool-using context primes
+    the model strongly; a trailer is easy to miss against that priming,
+    which is why the fork kept attempting write_file/patch and generating
+    recurring denial 'error' lines."""
+    import run_agent
+    from hermes_cli import plugins as _plugins
+
+    captured = {}
+
+    def _capture_run(self, *, user_message, conversation_history):
+        captured["user_message"] = user_message
+        # Stop the harness — we've got what we came for.
+        raise RuntimeError("stop after capturing user_message")
+
+    def _no_init(self, *args, **kwargs):
+        return None
+
+    def _passthrough_whitelist(whitelist, deny_msg_fmt=None):
+        # Let execution flow into run_conversation; just record nothing here.
+        return None
+
+    agent = _make_agent_stub(run_agent.AIAgent)
+
+    with patch.object(run_agent.AIAgent, "__init__", _no_init), \
+         patch.object(run_agent.AIAgent, "run_conversation", _capture_run), \
+         patch.object(_plugins, "set_thread_tool_whitelist",
+                      _passthrough_whitelist), \
+         patch.object(_plugins, "clear_thread_tool_whitelist",
+                      lambda: None), \
+         patch("threading.Thread", _SyncThread):
+        agent._spawn_background_review(
+            messages_snapshot=[],
+            review_memory=True,
+            review_skills=False,
+        )
+
+    assert "user_message" in captured, "run_conversation was not reached"
+    msg = captured["user_message"]
+    # Framing must be at the TOP, not the bottom — it must precede the
+    # review prompt body (which contains the literal "review memory" stub
+    # set up by _make_agent_stub).
+    framing_idx = msg.find("MEMORY/SKILL CURATION PASS")
+    body_idx = msg.find("review memory")
+    assert framing_idx >= 0, "curation framing absent from user_message"
+    assert body_idx > framing_idx, (
+        "framing must come BEFORE the review prompt body (front-loaded), "
+        f"got framing@{framing_idx} body@{body_idx}"
+    )
+    # Disarm the main-turn priming explicitly.
+    assert "already completed any file edits" in msg, (
+        "user_message must explicitly disarm the main turn's file/code "
+        "priming so the model doesn't try to repeat it"
+    )
+    # Name the actually-allowed curation tools so the model knows its
+    # exact surface (derived from the runtime whitelist — see the source).
+    for name in ("memory", "skill_manage", "skill_view", "skills_list"):
+        assert name in msg, (
+            f"curation preamble must list allowed tool {name!r}"
+        )
+    # The legacy weak trailer is gone — confirmation that the front-loaded
+    # preamble REPLACED it, not just supplemented it.
+    assert "You can only call memory and skill management tools" not in msg, (
+        "the old weak trailer should be removed in favor of the "
+        "front-loaded preamble (#163)"
+    )
+
+
+def test_background_review_preamble_landed_in_source():
+    """Source-level regression for #163: prevent silent drift back to the
+    weak trailer if a later refactor accidentally restores it."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2]
+           / "agent" / "background_review.py").read_text()
+    assert "hermes-agent#163" in src, "#163 marker absent — patch may be gone"
+    assert "MEMORY/SKILL CURATION PASS" in src
+    assert "_curation_preamble" in src
+    # Anchor on the precise old trailer text — if anything re-introduces
+    # the lone-trailer phrasing, this fails loudly.
+    assert (
+        "You can only call memory and skill "
+        "management tools. Other tools will be denied "
+        "at runtime — do not attempt them."
+    ) not in src, (
+        "the old weak trailer is back — #163 was supposed to remove it"
+    )
