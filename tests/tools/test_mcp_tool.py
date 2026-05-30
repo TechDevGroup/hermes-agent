@@ -3967,3 +3967,80 @@ class TestMcpParallelToolCalls:
             register_mcp_servers(config_off)
         with _lock:
             assert sanitize_mcp_name_component("toggle_srv") not in _parallel_safe_servers
+
+
+# ── hermes-agent#167 — devagentic env propagation ────────────────────────
+
+
+class TestDevagenticEnvPropagation:
+    """Regression coverage for hermes-agent#167.
+
+    Symptom: poly's main process had ``DEVAGENTIC_BASE_URL=http://devbox:6071/v1``,
+    but the ``hermes-internal`` MCP subprocess (python -m mcp_serve) had it
+    UNSET. The devagentic-docs / devagentic-canvas plugins running inside the
+    subprocess silently defaulted to ``http://127.0.0.1:6071/v1`` and every
+    ``doc_write`` / ``writeDoc`` connection-refused — disguised as a
+    transient ECONNREFUSED for ~5 hours.
+
+    Root cause: ``_build_safe_env`` only passed through PATH/HOME/USER/LANG/etc.
+    plus XDG_*. The DEVAGENTIC_* vars (which the bundled plugins consume) got
+    stripped silently. Fix: add them to ``_SAFE_ENV_KEYS``.
+    """
+
+    def test_devagentic_base_url_passes_through(self):
+        """The MCP subprocess must see ``DEVAGENTIC_BASE_URL`` so the
+        bundled devagentic-docs / canvas plugins hit the right host."""
+        from tools.mcp_tool import _build_safe_env
+
+        fake_env = {
+            "PATH": "/usr/bin",
+            "DEVAGENTIC_BASE_URL": "http://devbox:6071/v1",
+        }
+        with patch.dict("os.environ", fake_env, clear=True):
+            result = _build_safe_env(None)
+        assert result.get("DEVAGENTIC_BASE_URL") == "http://devbox:6071/v1", (
+            "DEVAGENTIC_BASE_URL must pass through to MCP subprocesses — "
+            "without it the bundled plugins silently default to 127.0.0.1"
+        )
+
+    def test_devagentic_api_key_passes_through(self):
+        """The bundled devagentic clients send DEVAGENTIC_API_KEY as a
+        Bearer header; without it, the subprocess gets 401s on a
+        non-trust-mode devagentic deployment."""
+        from tools.mcp_tool import _build_safe_env
+
+        fake_env = {
+            "PATH": "/usr/bin",
+            "DEVAGENTIC_API_KEY": "secret-token-value",
+        }
+        with patch.dict("os.environ", fake_env, clear=True):
+            result = _build_safe_env(None)
+        assert result.get("DEVAGENTIC_API_KEY") == "secret-token-value"
+
+    def test_devagentic_user_id_passes_through(self):
+        """DEVAGENTIC_USER_ID is the per-vertical identity used by every
+        devagentic GraphQL mutation; it must reach the MCP subprocess
+        so writeDoc lands under the right user vertical."""
+        from tools.mcp_tool import _build_safe_env
+
+        fake_env = {
+            "PATH": "/usr/bin",
+            "DEVAGENTIC_USER_ID": "polynomial-explorer",
+        }
+        with patch.dict("os.environ", fake_env, clear=True):
+            result = _build_safe_env(None)
+        assert result.get("DEVAGENTIC_USER_ID") == "polynomial-explorer"
+
+    def test_user_env_can_still_override_devagentic_vars(self):
+        """If an operator sets a server-specific ``env:`` block in
+        mcp_servers config, it must still override the parent's
+        DEVAGENTIC_* vars — same precedence as PATH overrides."""
+        from tools.mcp_tool import _build_safe_env
+
+        with patch.dict(
+            "os.environ",
+            {"PATH": "/usr/bin", "DEVAGENTIC_BASE_URL": "http://parent:6071"},
+            clear=True,
+        ):
+            result = _build_safe_env({"DEVAGENTIC_BASE_URL": "http://override:6071"})
+        assert result["DEVAGENTIC_BASE_URL"] == "http://override:6071"
