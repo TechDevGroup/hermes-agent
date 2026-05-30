@@ -2991,3 +2991,164 @@ class TestAuxUnhealthyCache:
             )
             # After the 402, OpenRouter is in the unhealthy cache.
             assert _is_provider_unhealthy("openrouter") is True
+
+
+# ── hermes-agent#165 — honest TTL + honest reason on unhealthy mark ────────
+
+
+class TestUnhealthyMarkReasonAndTtl:
+    """Regression cover for hermes-agent#165.
+
+    Symptom: poly's errors.log accumulated 294 ``Auxiliary: marking … unhealthy
+    for 60s (payment / credit error)`` warnings per session — 147x for
+    openrouter, 147x for nous, ~one per minute. Two bugs composed:
+
+    (1) The four no-credential / rate-limit call sites in
+        ``_try_openrouter`` and ``_try_nous`` passed an explicit ``ttl=60``,
+        overriding the much longer default. For a vertical that simply
+        wasn't configured with OpenRouter or Nous credentials, every aux
+        call re-probed every minute.
+    (2) ``_mark_provider_unhealthy``'s warning text was hardcoded to
+        ``payment / credit error`` regardless of cause, so the diagnostic
+        signal pointed at HTTP 402 even when the actual reason was
+        "no API key configured".
+
+    These tests pin both fixes."""
+
+    def test_mark_unhealthy_default_reason_remains_payment_credit(self):
+        """The default reason text must remain ``payment / credit error``
+        for backward compat with the 402-fallback call sites in
+        ``call_llm`` / ``acall_llm`` that don't pass an explicit reason."""
+        import logging
+        from agent.auxiliary_client import (
+            _mark_provider_unhealthy,
+            _aux_unhealthy_until,
+        )
+        _aux_unhealthy_until.clear()
+        with patch.object(logging.getLogger("agent.auxiliary_client"),
+                          "warning") as warn:
+            _mark_provider_unhealthy("openrouter")
+        assert warn.called
+        rendered = warn.call_args.args[0] % warn.call_args.args[1:]
+        assert "payment / credit error" in rendered
+
+    def test_mark_unhealthy_custom_reason_surfaces_in_log(self):
+        """Passing ``reason=`` must show that string instead of the
+        hardcoded ``payment / credit error`` — the whole point of #165."""
+        import logging
+        from agent.auxiliary_client import (
+            _mark_provider_unhealthy,
+            _aux_unhealthy_until,
+        )
+        _aux_unhealthy_until.clear()
+        with patch.object(logging.getLogger("agent.auxiliary_client"),
+                          "warning") as warn:
+            _mark_provider_unhealthy(
+                "openrouter",
+                ttl=42,
+                reason="OPENROUTER_API_KEY not set",
+            )
+        assert warn.called
+        rendered = warn.call_args.args[0] % warn.call_args.args[1:]
+        assert "OPENROUTER_API_KEY not set" in rendered
+        # And, critically, the misleading default phrase must NOT appear
+        # when a real reason was supplied.
+        assert "payment / credit error" not in rendered
+
+    def test_try_openrouter_no_key_uses_long_ttl_not_60s(self, monkeypatch):
+        """Site at ``_try_openrouter`` (no env API key path): the mark
+        must use the long no-credential TTL so the next aux call doesn't
+        re-probe in 60s."""
+        from agent.auxiliary_client import (
+            _try_openrouter,
+            _aux_unhealthy_until,
+            _AUX_NO_CREDENTIAL_TTL_SECONDS,
+        )
+        _aux_unhealthy_until.clear()
+        # No API key in env, no pool — should fall through to mark.
+        with patch("agent.auxiliary_client._select_pool_entry",
+                   return_value=(False, None)):
+            client, model = _try_openrouter()
+        assert client is None and model is None
+        assert "openrouter" in _aux_unhealthy_until
+        ttl_actual = _aux_unhealthy_until["openrouter"] - time.time()
+        # The mark must hold for far longer than the old 60s. Be generous
+        # on the lower bound (allow scheduling jitter) but pin the upper
+        # bound to within the configured no-credential window.
+        assert ttl_actual > 300, (
+            f"openrouter no-key TTL too short: {ttl_actual:.1f}s — "
+            "should use _AUX_NO_CREDENTIAL_TTL_SECONDS, not 60s"
+        )
+        assert ttl_actual <= _AUX_NO_CREDENTIAL_TTL_SECONDS + 5
+
+    def test_try_openrouter_pool_no_key_uses_long_ttl(self, monkeypatch):
+        """Site at ``_try_openrouter`` (pool present but entry missing
+        runtime API key): same long-TTL guarantee as the env-only branch."""
+        from agent.auxiliary_client import (
+            _try_openrouter,
+            _aux_unhealthy_until,
+            _AUX_NO_CREDENTIAL_TTL_SECONDS,
+        )
+        _aux_unhealthy_until.clear()
+        sentinel_entry = object()
+        with patch("agent.auxiliary_client._select_pool_entry",
+                   return_value=(True, sentinel_entry)), \
+             patch("agent.auxiliary_client._pool_runtime_api_key",
+                   return_value=""):
+            client, model = _try_openrouter()
+        assert client is None and model is None
+        assert "openrouter" in _aux_unhealthy_until
+        ttl_actual = _aux_unhealthy_until["openrouter"] - time.time()
+        assert ttl_actual > 300, (
+            f"openrouter pool-no-key TTL too short: {ttl_actual:.1f}s"
+        )
+        assert ttl_actual <= _AUX_NO_CREDENTIAL_TTL_SECONDS + 5
+
+    def test_try_nous_no_auth_uses_long_ttl_not_60s(self, monkeypatch):
+        """Site at ``_try_nous`` (no Nous authentication found): the mark
+        must use the long no-credential TTL so we don't re-warn every
+        minute about missing auth."""
+        from agent.auxiliary_client import (
+            _try_nous,
+            _aux_unhealthy_until,
+            _AUX_NO_CREDENTIAL_TTL_SECONDS,
+        )
+        _aux_unhealthy_until.clear()
+        with patch("agent.nous_rate_guard.nous_rate_limit_remaining",
+                   return_value=None), \
+             patch("agent.auxiliary_client._read_nous_auth",
+                   return_value=None), \
+             patch("agent.auxiliary_client._resolve_nous_runtime_api",
+                   return_value=None):
+            client, model = _try_nous()
+        assert client is None and model is None
+        assert "nous" in _aux_unhealthy_until
+        ttl_actual = _aux_unhealthy_until["nous"] - time.time()
+        assert ttl_actual > 300, (
+            f"nous no-auth TTL too short: {ttl_actual:.1f}s — "
+            "should use _AUX_NO_CREDENTIAL_TTL_SECONDS, not 60s"
+        )
+        assert ttl_actual <= _AUX_NO_CREDENTIAL_TTL_SECONDS + 5
+
+    def test_no_60s_ttl_left_at_no_credential_sites_in_source(self):
+        """Source-level regression: prevent silent drift back to
+        ``ttl=60`` at the no-credential sites. Patrols the file for the
+        precise pattern that triggered #165."""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[2]
+               / "agent" / "auxiliary_client.py").read_text()
+        # ``_try_openrouter`` + ``_try_nous`` must not contain the literal
+        # bare ``ttl=60``. The rate-limited site uses ``ttl=_remaining``,
+        # and the no-credential sites now use the named constant — neither
+        # should regress to a 60s literal.
+        offending = [
+            ln for ln in src.splitlines()
+            if "ttl=60" in ln and "ttl=600" not in ln
+            and "ttl=60_" not in ln  # don't false-trip on '60_seconds' etc.
+        ]
+        assert not offending, (
+            "Found ttl=60 in auxiliary_client.py — hermes-agent#165 was "
+            "supposed to replace the 60s literals at the no-credential "
+            f"sites with _AUX_NO_CREDENTIAL_TTL_SECONDS:\n  "
+            + "\n  ".join(offending)
+        )
