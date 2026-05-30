@@ -329,3 +329,153 @@ class TestFormatNoMatchHint:
         )
         assert result == ""
 
+
+
+# ── hermes-agent#168 — section-anchor + near-identical disambiguation ──
+
+
+class TestSectionAnchorDisambiguation:
+    """Regression coverage for hermes-agent#168.
+
+    Symptom: poly's SKILL.md updates failed 9 of 12 times because every
+    "Did you mean?" candidate was a markdown table row of the form
+    ``| ... | ✗ |`` — visually identical with the existing 2-line
+    context. The model retried the same too-short ``old_string`` and
+    looped. Fix: each candidate now carries the nearest preceding
+    markdown heading as an ``in:`` label, and when the top candidates
+    are near-identical (>0.9 ratio) the hint appends an educational
+    note telling the caller to expand ``old_string``.
+    """
+
+    def test_candidate_carries_section_anchor_label(self):
+        """Each candidate must be tagged with the nearest preceding markdown
+        heading so identical-looking rows in different sections are
+        distinguishable verbally, not just by line number."""
+        from tools.fuzzy_match import find_closest_lines
+        content = (
+            "# Top heading\n"
+            "## Verified Status\n"
+            "| op | path | status |\n"
+            "| signature → Roots | `s.py` | ✗ |\n"
+            "\n"
+            "## Pending Status\n"
+            "| op | path | status |\n"
+            "| signature → Roots | `s.py` | ✗ |\n"
+        )
+        result = find_closest_lines("| signature → Roots | `s.py` | ✗ |", content)
+        # Both section headings must surface as candidate anchors.
+        assert "Verified Status" in result
+        assert "Pending Status" in result
+        # And the candidates are labeled, not just dash-separated.
+        assert "Candidate 1" in result
+        assert "Candidate 2" in result
+
+    def test_no_section_anchor_when_no_heading_above(self):
+        """If no markdown heading precedes the candidate, the ``in:``
+        label is omitted entirely (we just emit the Candidate label
+        and the snippet — never a placeholder like ``in: None``)."""
+        from tools.fuzzy_match import find_closest_lines
+        content = "plain text\nanother line\ntarget line here\nmore text\n"
+        result = find_closest_lines("target line", content)
+        assert "Candidate 1" in result
+        # No bogus 'in:' label when there's no heading at all.
+        assert "in: None" not in result
+        assert "in: \n" not in result
+
+    def test_python_def_used_as_anchor_when_no_markdown_heading(self):
+        """For non-Markdown files, Python ``def``/``class`` lines stand in
+        as the section anchor — keeps the disambiguation hint useful
+        when ``file_path=`` targets a supporting .py."""
+        from tools.fuzzy_match import find_closest_lines
+        content = (
+            "def alpha():\n"
+            "    pass  # marker\n"
+            "    return 1\n"
+            "\n"
+            "def beta():\n"
+            "    pass  # marker\n"
+            "    return 2\n"
+        )
+        result = find_closest_lines("pass  # marker", content)
+        # The ``def alpha():`` / ``def beta():`` lines should surface
+        # as candidate anchors.
+        assert "def alpha" in result
+        assert "def beta" in result
+
+    def test_near_identical_hint_fires_on_table_rows(self):
+        """When the top candidates all match the anchor with ratio > 0.9
+        (the SKILL.md table case), the educational hint about expanding
+        ``old_string`` must be appended so the model gets actionable
+        feedback instead of looping."""
+        from tools.fuzzy_match import format_no_match_hint
+        content = (
+            "## Status\n"
+            "| op A | path | ✗ |\n"
+            "| op B | path | ✗ |\n"
+            "| op C | path | ✗ |\n"
+        )
+        # An old_string that matches a row tail — every row tail will
+        # score near-identically.
+        old = "| op X | path | ✗ |"
+        result = format_no_match_hint(
+            "Could not find a match for old_string in the file",
+            0, old, content,
+        )
+        assert "expand `old_string`" in result, (
+            f"educational hint missing — got:\n{result}"
+        )
+
+    def test_near_identical_hint_silent_for_unique_candidates(self):
+        """When the top candidate is clearly the best match (not
+        near-identical with runners-up), the educational hint must NOT
+        fire — it would just add noise."""
+        from tools.fuzzy_match import format_no_match_hint
+        content = (
+            "def alpha():\n"
+            "    return 'apple'\n"
+            "\n"
+            "def banana():\n"
+            "    return 'tropical'\n"
+            "\n"
+            "def carrot():\n"
+            "    return 'vegetable'\n"
+        )
+        result = format_no_match_hint(
+            "Could not find a match for old_string in the file",
+            0, "def alpha():", content,
+        )
+        # Standard hint fires...
+        assert "Did you mean" in result
+        # ...but the "expand old_string" educational note must NOT.
+        assert "expand `old_string`" not in result
+
+    def test_format_no_match_hint_still_silent_on_ambiguous_match(self):
+        """Defense-in-depth: the new educational hint must respect the
+        same gates as the rest of format_no_match_hint — don't append it
+        to ambiguous-match errors either."""
+        from tools.fuzzy_match import format_no_match_hint
+        content = "| x | ✗ |\n| y | ✗ |\n"
+        result = format_no_match_hint(
+            "Found 2 matches for old_string. Provide more context...",
+            0, "| ✗ |", content,
+        )
+        assert result == ""
+
+    def test_candidate_blocks_separated_for_readability(self):
+        """The previous ``\\n---\\n`` separator collided visually with the
+        markdown horizontal rule in patched files. The new format uses a
+        blank-line separator between Candidate blocks instead."""
+        from tools.fuzzy_match import find_closest_lines
+        content = (
+            "## A\n"
+            "target line in A\n"
+            "## B\n"
+            "target line in B\n"
+            "## C\n"
+            "target line in C\n"
+        )
+        result = find_closest_lines("target line", content)
+        # No lone '---' separator (was the old format).
+        assert "\n---\n" not in result
+        # Candidate label is present at least twice.
+        assert result.count("Candidate ") >= 2
