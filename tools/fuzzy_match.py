@@ -620,11 +620,57 @@ def _map_normalized_positions(original: str, normalized: str,
     return original_matches
 
 
-def find_closest_lines(old_string: str, content: str, context_lines: int = 2, max_results: int = 3) -> str:
+# hermes-agent#168 — Patterns used by find_closest_lines for section-anchor
+# detection. Markdown headings give the strongest disambiguator when a file
+# contains near-identical table rows (poly's SKILL.md patch failures);
+# falling back to a few other common section markers keeps the heuristic
+# useful for non-Markdown files too.
+_MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+_RST_UNDERLINE_RE = re.compile(r"^[=\-~^*+#]{3,}\s*$")
+_PY_DEF_RE = re.compile(r"^\s*(?:def|class)\s+\w+.*:\s*$")
+
+
+def _find_section_anchor(content_lines: List[str], line_idx: int) -> Optional[str]:
+    """Return a short, human-readable label for the nearest preceding section
+    header above ``line_idx`` — Markdown ``#`` heading, RST underline title,
+    or Python ``def`` / ``class``. Falls back to ``None`` when no anchor is
+    found, in which case the caller should omit the ``in:`` prefix.
+
+    Markdown headings are the primary use case (SKILL.md patches —
+    hermes-agent#168); the others are best-effort so the disambiguation
+    hint stays useful on supporting files patched via ``file_path=``.
+    """
+    for j in range(line_idx - 1, -1, -1):
+        line = content_lines[j]
+        m = _MARKDOWN_HEADING_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            return f"{'#' * level} {m.group(2).strip()}"
+        # RST underline → use the line above as the title.
+        if _RST_UNDERLINE_RE.match(line) and j > 0:
+            title = content_lines[j - 1].strip()
+            if title:
+                return title
+        if _PY_DEF_RE.match(line):
+            return line.strip().rstrip(":")
+    return None
+
+
+def find_closest_lines(
+    old_string: str,
+    content: str,
+    context_lines: int = 2,
+    max_results: int = 3,
+) -> str:
     """Find lines in content most similar to old_string for "did you mean?" feedback.
 
     Returns a formatted string showing the closest matching lines with context,
     or empty string if no useful match is found.
+
+    Each candidate is prefixed with the nearest preceding section anchor
+    (e.g. ``## Verified Status``) when one is detectable — this is the
+    primary disambiguator when the file contains near-identical lines
+    in different sections (hermes-agent#168).
     """
     if not old_string or not content:
         return ""
@@ -663,23 +709,59 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
 
     parts = []
     seen_ranges = set()
-    for _, line_idx in top:
+    for rank, (_, line_idx) in enumerate(top, start=1):
         start = max(0, line_idx - context_lines)
         end = min(len(content_lines), line_idx + len(old_lines) + context_lines)
         key = (start, end)
         if key in seen_ranges:
             continue
         seen_ranges.add(key)
-        snippet = "\n".join(
+        body = "\n".join(
             f"{start + j + 1:4d}| {content_lines[start + j]}"
             for j in range(end - start)
         )
-        parts.append(snippet)
+        section = _find_section_anchor(content_lines, line_idx)
+        header_parts = [f"Candidate {rank}"]
+        if section:
+            header_parts.append(f"in: {section}")
+        header = "  ".join(header_parts)
+        parts.append(f"{header}\n{body}")
 
     if not parts:
         return ""
 
-    return "\n---\n".join(parts)
+    return "\n\n".join(parts)
+
+
+def _candidates_are_near_identical(
+    old_string: str, content: str, max_results: int = 3,
+) -> bool:
+    """True when the top ``max_results`` candidate lines all match the
+    old_string anchor with ratio > 0.9 — i.e., they're so similar that
+    extra context lines alone won't help the caller pick the right one,
+    and the educational "expand old_string" hint is worth emitting
+    (hermes-agent#168).
+    """
+    if not old_string or not content:
+        return False
+    old_lines = old_string.splitlines()
+    if not old_lines:
+        return False
+    anchor = next((l.strip() for l in old_lines if l.strip()), "")
+    if not anchor:
+        return False
+    scored = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        ratio = SequenceMatcher(None, anchor, stripped).ratio()
+        scored.append(ratio)
+    if len(scored) < 2:
+        return False
+    scored.sort(reverse=True)
+    top = scored[:max_results]
+    return len(top) >= 2 and all(r > 0.9 for r in top)
 
 
 def format_no_match_hint(error: Optional[str], match_count: int,
@@ -692,6 +774,12 @@ def format_no_match_hint(error: Optional[str], match_count: int,
     be misleading — those failed for unrelated reasons.
 
     Returns an empty string when there's nothing useful to append.
+
+    hermes-agent#168 — when the top candidates are near-identical (e.g.
+    markdown table rows that share a structure), append a one-line
+    educational hint telling the caller to expand ``old_string`` with
+    surrounding context. Without that nudge, models tend to retry the
+    same too-short pattern and loop through repeated no-match failures.
     """
     if match_count != 0:
         return ""
@@ -700,4 +788,12 @@ def format_no_match_hint(error: Optional[str], match_count: int,
     hint = find_closest_lines(old_string, content)
     if not hint:
         return ""
-    return "\n\nDid you mean one of these sections?\n" + hint
+    result = "\n\nDid you mean one of these sections?\n" + hint
+    if _candidates_are_near_identical(old_string, content):
+        result += (
+            "\n\nThese candidates look near-identical. To target a "
+            "specific one, expand `old_string` with surrounding context "
+            "(e.g. the line above, a section heading, or a unique "
+            "column value from your target row)."
+        )
+    return result
