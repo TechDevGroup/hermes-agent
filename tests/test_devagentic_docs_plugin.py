@@ -21,7 +21,14 @@ PLUGIN_DIR = (Path(__file__).resolve().parents[1]
 @pytest.fixture
 def plugin_pkg(tmp_path, monkeypatch):
     """Load the devagentic-docs plugin modules as a synthetic
-    package so relative imports resolve."""
+    package so relative imports resolve.
+
+    hermes-agent#167 — preset a non-empty DEVAGENTIC_BASE_URL so tests
+    that focus on OTHER error paths (auth, unreachable, GraphQL errors)
+    don't all short-circuit on the new "BASE_URL not set" guard. Tests
+    that specifically exercise the unset case override this in-test.
+    """
+    monkeypatch.setenv("DEVAGENTIC_BASE_URL", "http://test:6070")
     pkg_name = "_devagentic_docs_under_test"
     spec = importlib.util.spec_from_file_location(
         pkg_name, PLUGIN_DIR / "__init__.py",
@@ -659,3 +666,42 @@ def test_doc_client_does_not_lazy_import_utils():
     )
     assert "_classify_http_error" in src
     assert "hermes-agent#161" in src
+
+
+# ── hermes-agent#167 — fail loud on unset DEVAGENTIC_BASE_URL ──
+
+
+def test_base_url_returns_none_when_env_unset(plugin_pkg, monkeypatch):
+    """hermes-agent#167: ``_base_url()`` must return None when
+    DEVAGENTIC_BASE_URL is unset rather than silently defaulting to
+    ``http://127.0.0.1:6071``. The silent default disguised a missing
+    env-propagation as a transient ECONNREFUSED for ~5 hours on poly."""
+    monkeypatch.delenv("DEVAGENTIC_BASE_URL", raising=False)
+    assert plugin_pkg.client._base_url() is None
+
+
+def test_base_url_returns_none_when_env_empty_or_whitespace(plugin_pkg, monkeypatch):
+    """Empty / whitespace env values count as unset — they previously
+    fell through to the localhost default just like the unset case."""
+    monkeypatch.setenv("DEVAGENTIC_BASE_URL", "   ")
+    assert plugin_pkg.client._base_url() is None
+    monkeypatch.setenv("DEVAGENTIC_BASE_URL", "")
+    assert plugin_pkg.client._base_url() is None
+
+
+def test_post_graphql_records_clear_error_when_base_url_unset(
+    plugin_pkg, monkeypatch
+):
+    """The slash-command surface reads ``last_error_text()`` to enrich
+    user-facing errors. When DEVAGENTIC_BASE_URL is unset, that slot
+    must hold a clear actionable message — not a misleading 127.0.0.1
+    connection-refused string."""
+    monkeypatch.delenv("DEVAGENTIC_BASE_URL", raising=False)
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "test-user")
+    result = plugin_pkg.client._post_graphql("query Q { x }", {})
+    assert result is None
+    err = plugin_pkg.client.last_error_text()
+    assert err is not None
+    assert "DEVAGENTIC_BASE_URL not set" in err
+    # And no misleading 127.0.0.1 reference — the whole point of the fix.
+    assert "127.0.0.1" not in err

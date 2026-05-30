@@ -51,7 +51,14 @@ def plugin_pkg(tmp_path, monkeypatch):
     """Load the devagentic-canvas plugin modules as a synthetic
     package so the relative imports (`from . import canvas_client`)
     resolve. Returns a SimpleNamespace with `commands`, `client`,
-    `preamble`, `register_module` attrs."""
+    `preamble`, `register_module` attrs.
+
+    hermes-agent#167 — preset a non-empty DEVAGENTIC_BASE_URL so tests
+    that focus on OTHER error paths don't short-circuit on the new
+    "BASE_URL not set" guard. Tests that exercise the unset case
+    override this in-test.
+    """
+    monkeypatch.setenv("DEVAGENTIC_BASE_URL", "http://test:6070")
     pkg_name = "_devagentic_canvas_under_test"
     # Build a synthetic package rooted at PLUGIN_DIR.
     spec = importlib.util.spec_from_file_location(
@@ -631,3 +638,30 @@ def test_canvas_client_does_not_lazy_import_utils():
     )
     assert "_classify_http_error" in src
     assert "hermes-agent#161" in src
+
+
+# ── hermes-agent#167 — fail loud on unset DEVAGENTIC_BASE_URL ──
+
+
+def test_base_url_returns_none_when_env_unset(plugin_pkg, monkeypatch):
+    """hermes-agent#167: mirror of the docs-plugin fix — the canvas
+    client must not silently fall through to 127.0.0.1 when
+    DEVAGENTIC_BASE_URL is unset."""
+    monkeypatch.delenv("DEVAGENTIC_BASE_URL", raising=False)
+    assert plugin_pkg.client._base_url() is None
+
+
+def test_request_records_clear_error_when_base_url_unset(
+    plugin_pkg, monkeypatch
+):
+    """Canvas slash commands read ``last_error_text()`` for user-facing
+    error enrichment. Unset DEVAGENTIC_BASE_URL must surface as a clear
+    actionable message, not a misleading 127.0.0.1 connection-refused."""
+    monkeypatch.delenv("DEVAGENTIC_BASE_URL", raising=False)
+    monkeypatch.setenv("DEVAGENTIC_USER_ID", "test-user")
+    result = plugin_pkg.client._request("GET", "es")
+    assert result is None
+    err = plugin_pkg.client.last_error_text()
+    assert err is not None
+    assert "DEVAGENTIC_BASE_URL not set" in err
+    assert "127.0.0.1" not in err

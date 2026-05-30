@@ -266,6 +266,16 @@ _MAX_BACKOFF_SECONDS = 60
 # Environment variables that are safe to pass to stdio subprocesses
 _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
+    # hermes-agent#167 — the bundled `hermes-internal` MCP server hosts the
+    # devagentic-{docs,canvas,mutations,lane-h} plugins whose HTTP clients
+    # need these. Without them, the subprocess silently defaulted to
+    # `http://127.0.0.1:6071` and every doc_write/writeDoc connection-refused
+    # inside containerized deployments where the devagentic service lives at
+    # a different host (e.g. `http://devbox:6071/v1`). Passing them through is
+    # safe: operator-configured 3rd-party MCP servers can override via the
+    # explicit `env:` block in mcp_servers config and the credentials are
+    # already trusted by the parent hermes process.
+    "DEVAGENTIC_BASE_URL", "DEVAGENTIC_API_KEY", "DEVAGENTIC_USER_ID",
 })
 
 # Regex for credential patterns to strip from error messages

@@ -54,12 +54,23 @@ def _classify_http_error(exc: BaseException) -> str:
 _DEFAULT_TIMEOUT = 8.0
 
 
-def _base_url() -> str:
+def _base_url() -> Optional[str]:
     """Resolve the GraphQL root URL. Accepts both `…:6070` and
     `…:6070/v1` forms (the latter has its /v1 stripped so we can
     compose `…/graphql`). Mirrors devagentic_skills + memory.
+
+    hermes-agent#167 — returns ``None`` when ``DEVAGENTIC_BASE_URL`` is
+    unset rather than silently falling back to ``http://127.0.0.1:6071``.
+    The old default disguised a misconfigured / non-propagated env (the
+    MCP subprocess inherited an empty env, which stripped this variable)
+    as a transient ECONNREFUSED for hours. The caller in ``_post_graphql``
+    records a precise error via ``_record_error`` so the slash-command
+    surface gets ``DEVAGENTIC_BASE_URL not set`` instead of a misleading
+    127.0.0.1 connection-refused.
     """
-    raw = os.environ.get("DEVAGENTIC_BASE_URL", "http://127.0.0.1:6071/v1")
+    raw = (os.environ.get("DEVAGENTIC_BASE_URL") or "").strip()
+    if not raw:
+        return None
     base = raw.rstrip("/")
     if base.endswith("/v1"):
         base = base[:-3]
@@ -112,6 +123,17 @@ def _post_graphql(query: str, variables: dict,
         _record_error(msg)
         return None
     base = _base_url()
+    if base is None:
+        # hermes-agent#167 — fail loud on unset DEVAGENTIC_BASE_URL
+        # instead of silently defaulting to 127.0.0.1. Inside containerized
+        # MCP subprocesses where the env wasn't propagated, the silent
+        # default looked like a transient connection-refused for hours.
+        msg = ("DEVAGENTIC_BASE_URL not set — propagate it from the "
+               "parent env into the MCP server config, or set it in "
+               "your hermes profile")
+        logger.debug("docs client: %s", msg)
+        _record_error(msg)
+        return None
     url = f"{base}/graphql"
     body = json.dumps({"query": query, "variables": variables}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")

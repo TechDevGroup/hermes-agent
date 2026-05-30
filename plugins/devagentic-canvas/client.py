@@ -55,8 +55,17 @@ _DEFAULT_TIMEOUT = 8.0
 _VERSION_SUFFIX_RE = re.compile(r"/v\d+$")
 
 
-def _base_url() -> str:
-    raw = os.environ.get("DEVAGENTIC_BASE_URL", "http://127.0.0.1:6071/v1")
+def _base_url() -> Optional[str]:
+    """Resolve the canvas REST root URL.
+
+    hermes-agent#167 — returns ``None`` when ``DEVAGENTIC_BASE_URL`` is
+    unset rather than silently defaulting to ``http://127.0.0.1:6071/v1``.
+    Mirrors the docs-client fix; ``_request`` checks for None and records
+    a precise error.
+    """
+    raw = (os.environ.get("DEVAGENTIC_BASE_URL") or "").strip()
+    if not raw:
+        return None
     trimmed = raw.rstrip("/")
     # Append /v1 when the operator set only host[:port] — silent 404s
     # otherwise (see #13). Respects an explicit /vN suffix.
@@ -115,6 +124,16 @@ def _request(method: str, path: str,
     """
     _record_error(None)
     base = _base_url()
+    if base is None:
+        # hermes-agent#167 — fail loud on unset DEVAGENTIC_BASE_URL
+        # instead of silently defaulting to 127.0.0.1. Same reasoning as
+        # the docs-client fix.
+        msg = ("DEVAGENTIC_BASE_URL not set — propagate it from the "
+               "parent env into the MCP server config, or set it in "
+               "your hermes profile")
+        logger.debug("canvas client: %s", msg)
+        _record_error(msg)
+        return None
     user = _user_id()
     if not user:
         msg = ("could not resolve user_id — set DEVAGENTIC_USER_ID or "
