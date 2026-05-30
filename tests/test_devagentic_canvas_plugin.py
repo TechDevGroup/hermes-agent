@@ -572,3 +572,62 @@ def test_preamble_caps_nodes(plugin_pkg, monkeypatch):
     assert f"`n{cap - 1}`" in ctx
     assert f"`n{cap}`" not in ctx
     assert "showing first" in ctx
+
+
+# ── hermes-agent#161: shadow-immune _classify_http_error ─────────────
+
+
+def _http_error(code: int):
+    import urllib.error
+    return urllib.error.HTTPError(
+        "http://x", code, "boom", hdrs={}, fp=None)
+
+
+def test_classify_http_error_auth(plugin_pkg):
+    """401/403 → 'auth' (mirrors utils.classify_http_error semantics)."""
+    assert plugin_pkg.client._classify_http_error(_http_error(401)) == "auth"
+    assert plugin_pkg.client._classify_http_error(_http_error(403)) == "auth"
+
+
+def test_classify_http_error_not_found(plugin_pkg):
+    assert plugin_pkg.client._classify_http_error(_http_error(404)) == "not_found"
+
+
+def test_classify_http_error_generic_http(plugin_pkg):
+    for code in (500, 502, 418):
+        assert plugin_pkg.client._classify_http_error(_http_error(code)) == "http"
+
+
+def test_classify_http_error_unreachable(plugin_pkg):
+    """URLError / OSError / TimeoutError all collapse to 'unreachable'."""
+    import urllib.error
+    for exc in (urllib.error.URLError("dns"),
+                OSError("conn refused"),
+                TimeoutError("deadline")):
+        assert plugin_pkg.client._classify_http_error(exc) == "unreachable"
+
+
+def test_classify_http_error_unknown_for_unrelated(plugin_pkg):
+    assert plugin_pkg.client._classify_http_error(ValueError("nope")) == "unknown"
+
+
+def test_canvas_client_does_not_lazy_import_utils():
+    """hermes-agent#161 regression: paired with the docs client. The same
+    lazy `from utils import classify_http_error` lived here and would
+    have hit the same shadow if a canvas call ever raised. Replaced
+    with the local helper; re-introducing the import brings the bug
+    back."""
+    src = (PLUGIN_DIR / "client.py").read_text()
+    # Line-level check so the comment quoting the error string doesn't
+    # trip the assertion — only real import lines count.
+    bad = [
+        ln for ln in src.splitlines()
+        if ln.lstrip().startswith("from utils import")
+    ]
+    assert not bad, (
+        "hermes-agent#161: do not re-introduce a real `from utils import` "
+        "line in this client — keep the http-error path shadow-immune "
+        f"via the local _classify_http_error helper. Found: {bad}"
+    )
+    assert "_classify_http_error" in src
+    assert "hermes-agent#161" in src

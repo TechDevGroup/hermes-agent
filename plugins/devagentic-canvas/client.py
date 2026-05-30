@@ -30,6 +30,27 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+# hermes-agent#161 — inline copy of utils.classify_http_error so this plugin
+# survives a system-installed `utils` package shadowing hermes's top-level
+# utils.py (live error on poly-explorer's doc_write: 'cannot import name
+# classify_http_error from utils (/usr/local/.../dist-packages/utils.py)').
+# Mirrors the docs client's local copy; keeps the http-error path here
+# self-contained and shadow-immune.
+def _classify_http_error(exc: BaseException) -> str:
+    """Map a urllib-style exception to one of: 'auth' / 'not_found' /
+    'http' / 'unreachable' / 'unknown'. Mirrors utils.classify_http_error."""
+    if isinstance(exc, urllib.error.HTTPError):
+        code = getattr(exc, "code", None)
+        if code in (401, 403):
+            return "auth"
+        if code == 404:
+            return "not_found"
+        return "http"
+    if isinstance(exc, (urllib.error.URLError, OSError, TimeoutError)):
+        return "unreachable"
+    return "unknown"
+
+
 _DEFAULT_TIMEOUT = 8.0
 _VERSION_SUFFIX_RE = re.compile(r"/v\d+$")
 
@@ -121,22 +142,18 @@ def _request(method: str, path: str,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        # HTTPError is a subclass of URLError; classify_http_error
-        # (#38) handles both via its single dispatch.
-        from utils import (
-            classify_http_error,
-            HTTP_ERROR_AUTH,
-            HTTP_ERROR_NOT_FOUND,
-            HTTP_ERROR_HTTP,
-        )
-        kind = classify_http_error(exc)
-        if kind == HTTP_ERROR_AUTH:
+        # HTTPError is a subclass of URLError; _classify_http_error (above)
+        # handles both via its single dispatch. Uses the local helper —
+        # NOT `from utils import ...` — so a system `utils` package
+        # shadow cannot break this error path (hermes-agent#161).
+        kind = _classify_http_error(exc)
+        if kind == "auth":
             msg = ("authentication failed — set DEVAGENTIC_API_KEY "
                    "(any non-empty value works when devagentic runs "
                    "in trust-header mode)")
-        elif kind == HTTP_ERROR_NOT_FOUND:
+        elif kind == "not_found":
             msg = f"not found at {url}"
-        elif kind == HTTP_ERROR_HTTP:
+        elif kind == "http":
             msg = f"HTTP {getattr(exc, 'code', '?')} from {url}"
         else:
             msg = f"unreachable at {url} ({exc})"
