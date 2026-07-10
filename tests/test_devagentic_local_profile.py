@@ -88,6 +88,7 @@ def test_resolve_user_id_handles_import_failure(plugin, monkeypatch):
 
 def test_build_api_kwargs_extras_injects_x_user_id(plugin, monkeypatch):
     monkeypatch.setenv("DEVAGENTIC_USER_ID", "alice")
+    monkeypatch.setenv("TERMINAL_ENV", "local")
     profile = plugin.DevagenticLocalProfile(
         name="test-devagentic-local",
         env_vars=("DEVAGENTIC_API_KEY",),
@@ -96,12 +97,17 @@ def test_build_api_kwargs_extras_injects_x_user_id(plugin, monkeypatch):
     )
     extra_body, top_level = profile.build_api_kwargs_extras()
     assert extra_body == {}, "no body-level additions"
-    assert top_level == {"extra_headers": {"X-User-Id": "alice"}}
+    assert top_level == {
+        "extra_headers": {"X-User-Id": "alice", "X-Terminal-Env": "local"}
+    }
 
 
-def test_build_api_kwargs_extras_omits_header_when_unresolved(
+def test_build_api_kwargs_extras_omits_user_id_when_unresolved(
         plugin, monkeypatch):
+    """X-User-Id is omitted when unresolved, but X-Terminal-Env (#155) is
+    sent on every request regardless."""
     monkeypatch.delenv("DEVAGENTIC_USER_ID", raising=False)
+    monkeypatch.setenv("TERMINAL_ENV", "modal")
     fake_mod = type(sys)("hermes_cli.profiles")
     fake_mod.get_active_profile_name = lambda: ""
     monkeypatch.setitem(sys.modules, "hermes_cli.profiles", fake_mod)
@@ -113,7 +119,31 @@ def test_build_api_kwargs_extras_omits_header_when_unresolved(
     )
     extra_body, top_level = profile.build_api_kwargs_extras()
     assert extra_body == {}
-    assert top_level == {}, "no X-User-Id when unresolved"
+    assert top_level == {"extra_headers": {"X-Terminal-Env": "modal"}}
+    assert "X-User-Id" not in top_level["extra_headers"]
+
+
+def test_build_api_kwargs_extras_injects_x_terminal_env(plugin, monkeypatch):
+    """#155: X-Terminal-Env reflects TERMINAL_ENV on every request and
+    defaults to 'local' when unset, so devagentic derives the backend."""
+    monkeypatch.delenv("DEVAGENTIC_USER_ID", raising=False)
+    fake_mod = type(sys)("hermes_cli.profiles")
+    fake_mod.get_active_profile_name = lambda: ""
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", fake_mod)
+    profile = plugin.DevagenticLocalProfile(
+        name="test-devagentic-local",
+        env_vars=("DEVAGENTIC_API_KEY",),
+        display_name="Devagentic (test)",
+        base_url="http://127.0.0.1:6071/v1",
+    )
+    # Explicit backend is forwarded verbatim (lowercased).
+    monkeypatch.setenv("TERMINAL_ENV", "Modal")
+    _, top = profile.build_api_kwargs_extras()
+    assert top["extra_headers"]["X-Terminal-Env"] == "modal"
+    # Unset → safe 'local' default (re-resolved per request).
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    _, top2 = profile.build_api_kwargs_extras()
+    assert top2["extra_headers"]["X-Terminal-Env"] == "local"
 
 
 def test_build_api_kwargs_extras_propagates_env_change_per_request(

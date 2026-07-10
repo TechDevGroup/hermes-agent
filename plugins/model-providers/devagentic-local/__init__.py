@@ -64,6 +64,16 @@ def _resolve_user_id() -> str | None:
         return None
 
 
+def _resolve_terminal_env() -> str:
+    """The execution backend hermes runs tools in — ``local`` / ``modal`` /
+    ``docker`` / etc., matching the ``TERMINAL_ENV`` convention used across
+    ``tools/``. Defaults to ``local`` when unset. Sent as ``X-Terminal-Env``
+    so devagentic derives the client's backend and composes the matching
+    env-contract preamble (issue #155 / devagentic#397).
+    """
+    return (os.environ.get("TERMINAL_ENV") or "local").strip().lower() or "local"
+
+
 class DevagenticLocalProfile(ProviderProfile):
     """Devagentic-as-a-completion-provider.
 
@@ -93,20 +103,30 @@ class DevagenticLocalProfile(ProviderProfile):
         reasoning_config: dict | None = None,
         **context: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Inject `X-User-Id` from the active hermes profile name.
+        """Inject per-request devagentic headers.
+
+        - `X-User-Id` (when resolvable) from the active hermes profile
+          name, binding the session to the right per-user vertical.
+        - `X-Terminal-Env` (always) so devagentic derives the client's
+          execution backend and composes the matching env-contract
+          preamble per backend (issue #155 / devagentic#397).
 
         The OpenAI SDK accepts `extra_headers` as a per-request kwarg;
         we add it to the `top_level_kwargs` half of the tuple so the
         transport layer threads it onto each `chat.completions.create`
         call. Per-request (not client-construction) so a process that
-        switches profiles mid-session picks up the change on the next
-        completion.
+        switches profiles or backends mid-session picks up the change
+        on the next completion.
         """
         extra_body_additions: dict[str, Any] = {}
         top_level_kwargs: dict[str, Any] = {}
+        headers: dict[str, str] = {}
         user_id = _resolve_user_id()
         if user_id:
-            top_level_kwargs["extra_headers"] = {"X-User-Id": user_id}
+            headers["X-User-Id"] = user_id
+        headers["X-Terminal-Env"] = _resolve_terminal_env()
+        if headers:
+            top_level_kwargs["extra_headers"] = headers
         return extra_body_additions, top_level_kwargs
 
 
